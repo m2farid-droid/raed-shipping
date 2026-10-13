@@ -8,6 +8,8 @@
 <!-- مكتبات Firebase (النسخة المتوافقة compat) -->
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+<!-- قراءة ملفات Excel -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
   :root{--pri:#7b1e2f;--pritxt:#fff;--bg:#fff;--txt:#111;--card:#141011;--cardtxt:#f3eaec;--acc:#c9a24a;--acctxt:#1a1200}
   body{font-family:'Segoe UI',Tahoma,Arial,sans-serif;background:var(--bg);color:var(--txt)}
@@ -36,6 +38,7 @@ const firebaseConfig = {
 /* ============ إعدادات النظام ============ */
 const SITES = ["Amazon", "Noon", "Babolat", "Raed Sport", "Yonex"];
 const FIXED_SHIPPING = {"Babolat": 50, "Raed Sport": 50}; // قيمة الشحن الثابتة (غيّرها حسب الحاجة)
+const OTO_SITES = ["Babolat", "Raed Sport", "Yonex"];      // القنوات المرتبطة بتتبع OTO (شحن Amazon و Noon ذاتي)
 </script>
 
 <div id="app" class="max-w-6xl mx-auto p-3 sm:p-6"></div>
@@ -50,7 +53,7 @@ let orders = {}, finance = {};
 let activeSite = SITES[0];
 let formSite = SITES[0];
 let formCodes = [""];
-let withWaybill = false;
+let otoSt = {last: 0, sum: ""}, logiTab = "await";
 let formNoon = "regular", noonFilter = "all";
 const bulkSel = new Set();
 const NOON_T = {regular: "نون عادي", express: "نون اكسبريس"};
@@ -152,7 +155,7 @@ function applyBulk(t){
   db.ref().update(upd); ids.forEach(i => bulkSel.delete(i)); $("#bw_" + t).value = "";
 }
 function bulkHtml(){
-  if (activeSite !== "Noon") return "";
+  if (activeSite !== "Noon" || !(noonReady("regular").length || noonReady("express").length)) return "";
   return `<div class="card p-4 mb-8 space-y-4"><h2 class="font-bold">بوليصة موحدة لأوردرات نون</h2>` + Object.keys(NOON_T).map(t => {
     const g = noonReady(t);
     return `<div class="border border-[var(--pri)] rounded-lg p-3 space-y-2"><div class="font-bold text-[var(--acc)]">${NOON_T[t]} (${g.length} جاهز للبوليصة)</div>` +
@@ -288,7 +291,6 @@ function setFormSite(s){ formSite = s; syncFormState(); render(); }
 function syncFormState(){
   const c = [...document.querySelectorAll(".codeInp")].map(i => i.value);
   if (c.length) formCodes = c;
-  const w = $("#wbChk"); if (w) withWaybill = w.checked;
 }
 function addCode(){
   syncFormState(); formCodes.push(""); skipSync = true; render();
@@ -298,16 +300,20 @@ function delCode(i){ syncFormState(); formCodes.splice(i, 1); if (!formCodes.len
 
 function submitOrder(){
   syncFormState();
+  const needTrk = OTO_SITES.includes(formSite);
   const image = $("#fImg").value.trim();
   const codes = formCodes.map(c => c.trim()).filter(Boolean).map(code => ({code, avail: null}));
-  const waybill = withWaybill ? $("#fWb").value.trim() : "";
+  const waybill = $("#fWb").value.trim();
+  const track = needTrk ? $("#fTrk").value.trim() : "";
   if (!image || !codes.length) return alert("أدخل رابط صورة الأوردر وكوداً واحداً على الأقل");
-  if (withWaybill && !waybill) return alert("أدخل رابط البوليصة أو ألغِ خيار إرسالها الآن");
+  if (!/^https?:\/\//i.test(waybill)) return alert("أدخل رابط بوليصة الشحن PDF بشكل صحيح (يبدأ بـ http)");
+  if (needTrk && !track) return alert("أدخل رقم الطلب في أوتو OTO");
   const rec = {site: formSite, image, codes, waybill, status: "pending", createdAt: Date.now()};
+  if (needTrk) rec.track = track;
   if (formSite === "Noon") rec.noonType = formNoon;
   db.ref("orders").push(rec);
-  formCodes = [""]; withWaybill = false; skipSync = true;
-  $("#fImg").value = ""; if ($("#fWb")) $("#fWb").value = "";
+  formCodes = [""]; skipSync = true;
+  ["#fImg", "#fWb", "#fTrk"].forEach(i => { if ($(i)) $(i).value = ""; });
   render();
 }
 function saveWaybill(id){
@@ -355,8 +361,8 @@ function renderAdmin(){
       <div class="flex gap-2"><input class="inp codeInp" value="${esc(c)}" placeholder="الكود ${i + 1}" dir="ltr">
       ${formCodes.length > 1 ? `<button class="tab" onclick="delCode(${i})">✕</button>` : ""}
       ${i === formCodes.length - 1 ? `<button class="btn" onclick="addCode()">+</button>` : ""}</div>`).join("")}</div>
-    <label class="flex items-center gap-2"><input id="wbChk" type="checkbox" ${withWaybill ? "checked" : ""} onchange="syncFormState();render()"> إرسال البوليصة الآن مع الأوردر</label>
-    ${withWaybill ? `<input id="fWb" class="inp" placeholder="رابط بوليصة PDF على Google Drive" dir="ltr">` : ""}
+    <label class="block text-sm space-y-1"><span>رابط بوليصة الشحن PDF <b class="text-red-400">*</b></span><input id="fWb" class="inp" placeholder="رابط بوليصة الشحن PDF" dir="ltr"></label>
+    ${OTO_SITES.includes(formSite) ? `<label class="block text-sm space-y-1"><span>رقم الطلب في أوتو OTO (كما يظهر في العمود A بالشيت) <b class="text-red-400">*</b></span><input id="fTrk" class="inp" placeholder="رقم الطلب في OTO" dir="ltr"></label>` : ""}
     <button class="btn w-full sm:w-auto" onclick="submitOrder()">إرسال الأوردر إلى الفرع</button>
   </div>
 
@@ -368,6 +374,7 @@ function renderAdmin(){
       ${badge(o)}${imgHtml(o.image, "h-40")}
       <div class="text-xs text-[var(--acc)]">${statusLabel(o)}</div>
       <div class="space-y-1">${o.codes.map(c => `<div class="flex justify-between text-sm bg-black/40 rounded px-2 py-1"><span dir="ltr">${esc(c.code)}</span><span>${c.avail === true ? "✅ متوفر" : c.avail === false ? "❌ غير متوفر" : "—"}</span></div>`).join("")}</div>
+      ${trackBlock(o)}
       ${o.status === "prepared" && !o.waybill && o.site === "Noon" ? `<div class="text-xs text-[var(--acc)]">بوليصتها تُضاف من قسم البوليصة الموحدة أسفل القائمة</div>` : ""}${o.status === "prepared" && !o.waybill && o.site !== "Noon" ? `<input id="wb_${o.id}" class="inp" placeholder="رابط البوليصة PDF" dir="ltr"><button class="btn gold w-full" onclick="saveWaybill('${o.id}')">إضافة البوليصة</button>` : ""}
       <button class="text-red-400 text-xs" onclick="deleteOrder('${o.id}')">حذف الأوردر</button>
     </div>`).join("") : `<p class="text-[#6b5a5e] col-span-full">لا توجد أوردرات في ${activeSite} حالياً.</p>`}
@@ -392,13 +399,123 @@ function renderAdmin(){
       <tbody>${finRows.map(f => `<tr class="border-t border-[#3a2227]"><td class="p-2">${esc(f.site)}</td><td>${esc(f.no)}</td><td>${esc(f.name)}</td><td>${esc(f.date)}</td><td>${f.sum}</td><td>${f.ship}</td><td>${f.disc}</td><td class="font-bold">${f.total}</td><td><button class="text-red-400" onclick="deleteFin('${f.id}')">✕</button></td></tr>`).join("")}</tbody>
       <tfoot><tr class="border-t border-[var(--pri)] font-bold"><td colspan="7" class="p-2 text-left">إجمالي التقرير</td><td>${grand.toFixed(2)}</td><td></td></tr></tfoot>
     </table></div>
-  </div>`;
+  </div>
+  ${logiHtml()}`;
   if ($("#ftSite")) onFinSite();
 }
 
 
+
+/* ============ المتابعة اللوجستية وربط OTO (قنوات OTO فقط) ============ */
+const STAGE_T = {await: "بانتظار الاستلام", transit: "جاري شحنها", delivered: "تم توصيلها", returned: "مرتجع"};
+const STAGE_C = {await: "#c9a24a", transit: "#2563eb", delivered: "#1f7a46", returned: "#b3261e"};
+/* Amazon / Noon المشحونة تُعتبر "تم توصيلها" مباشرة (شحنهما ذاتي ولا يمر عبر OTO) */
+const stageOf = o => o.logi || (o.status === "shipped" && !OTO_SITES.includes(o.site) ? "delivered" : null);
+const stageChip = o => { const st = stageOf(o); return st ? `<span class="inline-block text-xs font-bold rounded px-2 py-1" style="background:${STAGE_C[st]};color:${inkOf(STAGE_C[st])}">${STAGE_T[st]}</span>` : ""; };
+const logiList = () => list().filter(o => OTO_SITES.includes(o.site) && o.status === "shipped" && o.logi);
+function trackBlock(o){
+  if (!OTO_SITES.includes(o.site)) return "";
+  const t = String(o.track || "");
+  if (!t) return `<div class="flex gap-2"><input id="trk_${o.id}" class="inp" placeholder="رقم الطلب في OTO (غير مسجل)" dir="ltr"><button class="btn gold" onclick="saveTrack('${o.id}')">حفظ</button></div>`;
+  return `<div class="text-xs">🔎 رقم الطلب في OTO: <b dir="ltr">${esc(t)}</b></div>`;
+}
+function saveTrack(id){
+  const v = $("#trk_" + id).value.trim();
+  if (!v) return alert("أدخل رقم الطلب في OTO");
+  db.ref("orders/" + id + "/track").set(v);
+}
+function setLogiTab(k){ logiTab = k; render(); }
+function setStage(id, v){
+  if (!v) return;
+  const now = Date.now();
+  db.ref("orders/" + id).update({logi: v, logiAt: now, logiManual: true, deliveredAt: v === "delivered" ? now : null});
+}
+function autoStage(id){ db.ref("orders/" + id).update({logiManual: null}); }
+
+/* --- تحديث الحالات من شيت OTO اليومي (Excel): العمود A = رقم الطلب، العمود H = الحالة --- */
+const normNo = v => String(v == null ? "" : v).replace(/[\u200e\u200f\s]/g, "").replace(/[٠-٩]/g, d => "٠١٢٣٤٥٦٧٨٩".indexOf(d)).toUpperCase();
+/* الحالة من العمود H؛ وإن كان فارغاً أو رقم تتبع (طلب جديد/ملغي/تم تأكيد الشحنة) تُؤخذ من العمود C */
+function otoStatusOf(r){
+  const h = String(r[7] == null ? "" : r[7]).trim(), c = String(r[2] == null ? "" : r[2]).trim();
+  if (h && !/^\d+$/.test(h)) return h;
+  if (c && !/^\d{1,2}\/\d{1,2}\/\d{4}/.test(c)) return c;
+  return "";
+}
+function mapOto(raw){
+  const t = String(raw || "").toLowerCase();
+  if (!t) return null;
+  if (/عكس|إرجاع|ارجاع|مرتجع|return/.test(t)) return "returned";
+  if (/غير ناجح|فشل|undeliver|failed/.test(t)) return "transit";
+  if (/تم توصيل|تم التسليم|تم تسليم|delivered/.test(t)) return "delivered";
+  if (/وصل المستودع|في طريقها|قيد التوصيل|خرج للتوصيل|تم الاستلام|تم استلام|transit|picked/.test(t)) return "transit";
+  if (/الطلبات الجديدة|تم تأكيد الشحنة|جديد|بانتظار|قيد المعالجة|pending/.test(t)) return "await";
+  return null;   /* مثل "طلب ملغي": لا يُنقل الأوردر ويظهر نص الحالة فقط */
+}
+function otoRowsToMap(rows){
+  const m = new Map();
+  rows.forEach(r => { const k = normNo(r && r[0]); if (k && !m.has(k)) m.set(k, otoStatusOf(r)); });
+  return m;
+}
+async function importOto(inp){
+  const f = inp.files && inp.files[0]; inp.value = "";
+  if (!f) return;
+  if (typeof XLSX === "undefined") return alert("مكتبة قراءة Excel لم تُحمَّل. تأكد من الإنترنت ثم أعد تحميل الصفحة.");
+  try {
+    const wb = XLSX.read(await f.arrayBuffer(), {type: "array"});
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], {header: 1, raw: true, defval: ""});
+    const map = otoRowsToMap(rows), now = Date.now(), upd = {}, unknown = new Set();
+    let changed = 0, same = 0, missing = 0, manual = 0, noNo = 0;
+    logiList().forEach(o => {
+      if (o.logiManual) { manual++; return; }
+      if (!o.track) { noNo++; return; }
+      const k = normNo(o.track);
+      if (!map.has(k)) { missing++; return; }
+      const raw = map.get(k), st = mapOto(raw), b = "orders/" + o.id + "/";
+      upd[b + "otoRaw"] = raw; upd[b + "otoCheckedAt"] = now;
+      if (!st) { if (raw) unknown.add(raw); same++; return; }
+      if (st !== o.logi) { upd[b + "logi"] = st; upd[b + "logiAt"] = now; if (st === "delivered") upd[b + "deliveredAt"] = now; changed++; } else same++;
+    });
+    if (Object.keys(upd).length) await db.ref().update(upd);
+    otoSt.last = now;
+    otoSt.sum = `قُرئ ${map.size} طلب من الشيت. تم نقل ${changed} أوردر، بدون تغيير ${same}` +
+      (missing ? `، غير موجود في الشيت ${missing}` : "") + (noNo ? `، بدون رقم OTO ${noNo}` : "") + (manual ? `، يدوي ${manual}` : "") +
+      (unknown.size ? ` | حالات غير مصنفة (لم تُنقل): ${[...unknown].join("، ")}` : "");
+    render();
+  } catch (e) { alert("تعذر قراءة الملف: " + (e.message || e)); }
+}
+
+function logiHtml(){
+  const all = logiList(), c = {await: 0, transit: 0, delivered: 0, returned: 0, all: all.length};
+  all.forEach(o => { if (c[o.logi] != null) c[o.logi]++; });
+  const tabs = ["await", "transit", "delivered", "returned", "all"].map(k =>
+    `<button class="tab text-sm ${k === logiTab ? "on" : ""}" onclick="setLogiTab('${k}')">${k === "all" ? "جميع الطلبات" : STAGE_T[k]} (${c[k]})</button>`).join("");
+  const rows = all.filter(o => logiTab === "all" || o.logi === logiTab).sort((a, b) => (b.logiAt || 0) - (a.logiAt || 0));
+  const st = otoSt.sum ? `آخر تحديث من الشيت: ${fmtDT(otoSt.last)} | ${esc(otoSt.sum)}` : "ارفع شيت OTO اليومي ليتم تحديث الحالات (رقم الطلب من العمود A والحالة من العمود H).";
+  return `<div class="card p-4 mt-8 mb-8 space-y-3">
+    <div class="flex items-center justify-between gap-2 flex-wrap"><h2 class="font-bold">المتابعة اللوجستية - OTO (${OTO_SITES.map(esc).join(" / ")})</h2>
+      <label class="tab text-sm cursor-pointer">📥 رفع شيت OTO<input type="file" accept=".xlsx,.xls,.csv" class="hidden" onchange="importOto(this)"></label></div>
+    <div class="text-xs text-[var(--acc)]">${st}</div>
+    <div class="flex gap-2 flex-wrap">${tabs}</div>
+    <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+    ${rows.length ? rows.map(o => {
+      const sc = (S.sites[o.site] || {}).color || "#444";
+      return `<div class="bg-black/40 rounded-lg p-3 space-y-2">
+        <div class="flex items-center gap-2 flex-wrap"><span class="inline-block text-xs font-bold rounded px-2 py-1" style="background:${sc};color:${inkOf(sc)}">${esc(o.site)}</span>${stageChip(o)}${o.logiManual ? `<span class="text-xs text-[var(--acc)]">(يدوي)</span>` : ""}</div>
+        <div class="space-y-1">${(o.codes || []).map(k => `<div class="text-sm bg-black/40 rounded px-2 py-1" dir="ltr">${esc(k.code)}</div>`).join("")}</div>
+        ${trackBlock(o)}
+        <div class="text-xs space-y-1"><div>📤 الإرسال: <b dir="ltr">${fmtDT(o.createdAt)}</b></div><div>🚚 الشحن: <b dir="ltr">${fmtDT(o.shippedAt)}</b></div>
+          ${o.deliveredAt ? `<div>📬 التوصيل: <b dir="ltr">${fmtDT(o.deliveredAt)}</b></div>` : ""}
+          ${o.otoRaw ? `<div>حالة OTO: <b dir="ltr">${esc(o.otoRaw)}</b></div>` : ""}
+          ${o.otoCheckedAt ? `<div>آخر تحديث: <b dir="ltr">${fmtDT(o.otoCheckedAt)}</b></div>` : ""}</div>
+        <select class="inp text-xs" onchange="setStage('${o.id}', this.value)"><option value="">نقل يدوي إلى...</option>${Object.entries(STAGE_T).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}</select>
+        ${o.logiManual ? `<button class="tab text-xs" onclick="autoStage('${o.id}')">إعادة التتبع التلقائي</button>` : ""}
+      </div>`;
+    }).join("") : `<p class="text-[#9b8a8e] col-span-full">لا توجد أوردرات في هذا القسم.</p>`}
+    </div></div>`;
+}
+
 /* ============ سجل الأوردرات المشحونة (للإدارة) ============ */
-let hSite = "all", hQ = "", hFrom = "", hTo = "";
+let hSite = "all", hQ = "", hFrom = "", hTo = "", hStage = "all";
 const pad2 = n => String(n).padStart(2, "0");
 const dayStr = t => { const d = new Date(t); return d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate()); };
 const fmtDT = t => { if (!t) return "—"; const d = new Date(t); return pad2(d.getDate()) + "/" + pad2(d.getMonth() + 1) + "/" + d.getFullYear() + " " + pad2(d.getHours()) + ":" + pad2(d.getMinutes()); };
@@ -407,6 +524,7 @@ function histItems(){
   return list().filter(o => o.status === "shipped"
       && (hSite === "all" || o.site === hSite)
       && (!q || (o.codes || []).some(c => String(c.code).toLowerCase().includes(q)))
+      && (hStage === "all" || stageOf(o) === hStage)
       && (!hFrom || dayStr(o.createdAt) >= hFrom)
       && (!hTo || dayStr(o.createdAt) <= hTo))
     .sort((a, b) => (b.shippedAt || b.createdAt) - (a.shippedAt || a.createdAt));
@@ -416,10 +534,10 @@ function histListHtml(){
   const cards = items.length ? items.map(o => {
     const sc = (S.sites[o.site] || {}).color || "#444";
     return `<div class="card p-3 space-y-2">
-      <div class="flex items-center gap-2 flex-wrap"><span class="inline-block text-xs font-bold rounded px-2 py-1" style="background:${sc};color:${inkOf(sc)}">${esc(o.site)}</span>${badge(o)}</div>
+      <div class="flex items-center gap-2 flex-wrap"><span class="inline-block text-xs font-bold rounded px-2 py-1" style="background:${sc};color:${inkOf(sc)}">${esc(o.site)}</span>${badge(o)}${stageChip(o)}</div>
       ${o.image ? imgHtml(o.image, "h-32") : ""}
       <div class="text-xs space-y-1"><div>📤 تاريخ الإرسال: <b dir="ltr">${fmtDT(o.createdAt)}</b></div>
-        <div>✅ تاريخ الشحن: <b dir="ltr">${fmtDT(o.shippedAt)}</b></div></div>
+        <div>✅ تاريخ الشحن: <b dir="ltr">${fmtDT(o.shippedAt)}</b></div>${o.deliveredAt ? `<div>📬 تاريخ التوصيل: <b dir="ltr">${fmtDT(o.deliveredAt)}</b></div>` : ""}</div>
       <div class="space-y-1">${(o.codes || []).map(c => `<div class="flex justify-between text-sm bg-black/40 rounded px-2 py-1"><span dir="ltr">${esc(c.code)}</span><span>${c.avail === true ? "✅ متوفر" : c.avail === false ? "❌ غير متوفر" : "—"}</span></div>`).join("")}</div>
       ${o.waybill ? `<a class="text-xs text-[var(--acc)] underline" target="_blank" rel="noopener" href="${safeUrl(o.waybill)}">فتح البوليصة</a>` : ""}
     </div>`;
@@ -428,7 +546,7 @@ function histListHtml(){
 }
 function updHist(){ const e = $("#histList"); if (e) e.innerHTML = histListHtml(); }
 function setHSite(s){ hSite = s; render(); }
-function clearHist(){ hQ = ""; hFrom = ""; hTo = ""; hSite = "all"; noKeep = true; render(); }
+function clearHist(){ hQ = ""; hFrom = ""; hTo = ""; hSite = "all"; hStage = "all"; noKeep = true; render(); }
 function renderHistory(){
   const pills = [["all", "الكل"], ...SITES.map(s => [s, s])].map(([k, l]) => {
     const c = k === "all" ? "#444" : ((S.sites[k] || {}).color || "#444");
@@ -437,10 +555,11 @@ function renderHistory(){
   $("#app").innerHTML = header("سجل الأوردرات المشحونة", `<button class="tab text-sm" onclick="setView('main')">رجوع</button>`) + `
   <div class="card p-4 mb-4 space-y-3">
     <div class="flex gap-2 flex-wrap">${pills}</div>
-    <div class="grid sm:grid-cols-4 gap-2 items-end">
+    <div class="grid sm:grid-cols-5 gap-2 items-end">
       <input id="hq" class="inp" placeholder="بحث بالكود" dir="ltr" value="${esc(hQ)}" oninput="hQ=this.value;updHist()">
       <label class="text-xs space-y-1 block"><span>من تاريخ الإرسال</span><input id="hfrom" type="date" class="inp" value="${esc(hFrom)}" oninput="hFrom=this.value;updHist()"></label>
       <label class="text-xs space-y-1 block"><span>إلى تاريخ الإرسال</span><input id="hto" type="date" class="inp" value="${esc(hTo)}" oninput="hTo=this.value;updHist()"></label>
+      <select id="hstage" class="inp" onchange="hStage=this.value;updHist()"><option value="all">كل الحالات</option>${Object.entries(STAGE_T).map(([k, v]) => `<option value="${k}" ${hStage === k ? "selected" : ""}>${v}</option>`).join("")}</select>
       <button class="tab" onclick="clearHist()">مسح الفلاتر</button>
     </div>
   </div>
@@ -450,7 +569,14 @@ function renderHistory(){
 /* ============ شاشة فرع السعودية ============ */
 function mark(id, i, val){ db.ref(`orders/${id}/codes/${i}/avail`).set(val); }
 function prepared(id){ db.ref(`orders/${id}/status`).set("prepared"); }
-function shipped(id){ if (confirm("تأكيد الشحن النهائي؟ سيختفي الأوردر من شاشتك.")) db.ref(`orders/${id}`).update({status: "shipped", shippedAt: Date.now()}); }
+function shipped(id){
+  const o = orders[id]; if (!o) return;
+  if (!confirm("تأكيد الشحن النهائي؟ سيختفي الأوردر من شاشتك.")) return;
+  const now = Date.now(), upd = {status: "shipped", shippedAt: now, logiAt: now};
+  if (OTO_SITES.includes(o.site)) upd.logi = "await";            /* Babolat / Raed Sport / Yonex: لوحة المتابعة بحالة بانتظار الاستلام */
+  else { upd.logi = "delivered"; upd.deliveredAt = now; }        /* Amazon / Noon: تم توصيلها مباشرة وتنتقل للأرشيف */
+  db.ref("orders/" + id).update(upd);
+}
 
 function renderBranch(){
   const items = open().filter(o => o.site === activeSite && (activeSite !== "Noon" || noonFilter === "all" || typeOf(o) === noonFilter));
@@ -469,8 +595,7 @@ function renderBranch(){
             <button ${isPrepared ? "disabled" : ""} class="btn ${c.avail === false ? "" : "opacity-60"}" style="${c.avail === false ? "background:#b3261e" : ""}" onclick="mark('${o.id}',${i},false)">غير متوفر ❌</button>
           </div></div>`).join("")}
       ${!isPrepared ? `<button class="btn w-full" ${allMarked ? "" : "disabled"} onclick="prepared('${o.id}')">تم التجهيز</button>` : ""}
-      ${o.waybill ? `<a class="btn gold block text-center" target="_blank" rel="noopener" href="${safeUrl(o.waybill)}">فتح وطباعة بوليصة الشحن PDF</a>` : (isPrepared ? `<p class="text-sm text-[var(--acc)] text-center">تم الإرسال للإدارة، في انتظار إضافة البوليصة...</p>` : "")}
-      ${isPrepared && o.waybill ? `<button class="btn w-full" onclick="shipped('${o.id}')">تم الشحن النهائي</button>` : ""}
+      ${o.waybill ? `<div class="grid ${isPrepared ? "grid-cols-2" : "grid-cols-1"} gap-2"><a class="btn gold block text-center" target="_blank" rel="noopener" href="${safeUrl(o.waybill)}">فتح وطباعة بوليصة الشحن PDF</a>${isPrepared ? `<button class="btn" onclick="shipped('${o.id}')">تم الشحن النهائي</button>` : ""}</div>` : (isPrepared ? `<p class="text-sm text-[var(--acc)] text-center">تم الإرسال للإدارة، في انتظار إضافة البوليصة...</p>` : "")}
     </div>`;}).join("") : `<p class="text-[#6b5a5e] col-span-full">لا توجد أوردرات في ${activeSite} حالياً.</p>`}
   </div>`;
 }
