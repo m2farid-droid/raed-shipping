@@ -386,7 +386,7 @@ function renderAdmin(){
       ${badge(o)}${imgHtml(o.image, "h-40")}
       <div class="text-xs text-[var(--acc)]">${statusLabel(o)}</div>
       <div class="space-y-1">${o.codes.map(c => `<div class="flex justify-between text-sm bg-black/40 rounded px-2 py-1"><span dir="ltr">${esc(c.code)}</span><span>${c.avail === true ? "✅ متوفر" : c.avail === false ? "❌ غير متوفر" : "—"}</span></div>`).join("")}</div>
-      ${o.status === "prepared" ? (o.waybill ? trackBlock(o) : waybillForm(o)) : ""}
+      ${o.status === "prepared" ? (o.waybill ? trackBlock(o) : waybillForm(o)) : (o.track ? trackBlock(o) : "")}${otoLine(o)}
       <button class="text-red-400 text-xs" onclick="deleteOrder('${o.id}')">حذف الأوردر</button>
     </div>`).join("") : `<p class="text-[#6b5a5e] col-span-full">لا توجد أوردرات في ${activeSite} حالياً.</p>`}
   </div>
@@ -424,6 +424,7 @@ const STAGE_C = {await: "#c9a24a", transit: "#2563eb", delivered: "#1f7a46", ret
 const stageOf = o => o.logi || (o.status === "shipped" && !OTO_SITES.includes(o.site) ? "delivered" : null);
 const stageChip = o => { const st = stageOf(o); return st ? `<span class="inline-block text-xs font-bold rounded px-2 py-1" style="background:${STAGE_C[st]};color:${inkOf(STAGE_C[st])}">${STAGE_T[st]}</span>` : ""; };
 const logiList = () => list().filter(o => OTO_SITES.includes(o.site) && o.status === "shipped" && o.logi);
+const otoLine = o => o.otoRaw ? `<div class="text-xs">حالة OTO: <b>${esc(o.otoRaw)}</b></div>` : "";
 function trackBlock(o){
   if (!OTO_SITES.includes(o.site)) return "";
   const t = String(o.track || "");
@@ -474,22 +475,28 @@ async function importOto(inp){
   try {
     const wb = XLSX.read(await f.arrayBuffer(), {type: "array"});
     const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], {header: 1, raw: true, defval: ""});
-    const map = otoRowsToMap(rows), now = Date.now(), upd = {}, unknown = new Set();
-    let changed = 0, same = 0, missing = 0, manual = 0, noNo = 0;
-    logiList().forEach(o => {
+    const map = otoRowsToMap(rows);
+    if (!map.size) return alert("لم أجد أي صفوف في الملف. تأكد أنه شيت OTO الصحيح.");
+    const now = Date.now(), upd = {}, unknown = new Set(), miss = [];
+    let changed = 0, same = 0, pre = 0, manual = 0, noNo = 0;
+    list().filter(o => OTO_SITES.includes(o.site)).forEach(o => {
+      if (!o.track) { if (o.status === "shipped") noNo++; return; }
       if (o.logiManual) { manual++; return; }
-      if (!o.track) { noNo++; return; }
       const k = normNo(o.track);
-      if (!map.has(k)) { missing++; return; }
+      if (!map.has(k)) { miss.push(o.track); return; }
       const raw = map.get(k), st = mapOto(raw), b = "orders/" + o.id + "/";
       upd[b + "otoRaw"] = raw; upd[b + "otoCheckedAt"] = now;
-      if (!st) { if (raw) unknown.add(raw); same++; return; }
-      if (st !== o.logi) { upd[b + "logi"] = st; upd[b + "logiAt"] = now; if (st === "delivered") upd[b + "deliveredAt"] = now; changed++; } else same++;
+      if (raw && !st) unknown.add(raw);
+      if (o.status !== "shipped") { pre++; return; }      /* لم يُشحن من الفرع بعد: نحفظ نص الحالة فقط */
+      const to = st || o.logi || "await";
+      if (to !== o.logi) { upd[b + "logi"] = to; upd[b + "logiAt"] = now; if (to === "delivered") upd[b + "deliveredAt"] = now; changed++; } else same++;
     });
     if (Object.keys(upd).length) await db.ref().update(upd);
     otoSt.last = now;
-    otoSt.sum = `قُرئ ${map.size} طلب من الشيت. تم نقل ${changed} أوردر، بدون تغيير ${same}` +
-      (missing ? `، غير موجود في الشيت ${missing}` : "") + (noNo ? `، بدون رقم OTO ${noNo}` : "") + (manual ? `، يدوي ${manual}` : "") +
+    otoSt.sum = `قُرئ ${map.size} طلب من الشيت. نُقل ${changed} أوردر، بدون تغيير ${same}` +
+      (pre ? `، ${pre} لم يُشحن من الفرع بعد (حُفظت حالته فقط)` : "") +
+      (miss.length ? `، غير موجود في الشيت: ${miss.slice(0, 8).join("، ")}` : "") +
+      (noNo ? `، بدون رقم OTO ${noNo}` : "") + (manual ? `، يدوي ${manual}` : "") +
       (unknown.size ? ` | حالات غير مصنفة (لم تُنقل): ${[...unknown].join("، ")}` : "");
     render();
   } catch (e) { alert("تعذر قراءة الملف: " + (e.message || e)); }
