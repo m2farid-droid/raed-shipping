@@ -53,7 +53,7 @@ let orders = {}, finance = {};
 let activeSite = SITES[0];
 let formSite = SITES[0];
 let formCodes = [""];
-let otoSt = {last: 0, sum: ""}, logiTab = "await";
+let withWaybill = false, otoSt = {last: 0, sum: ""}, logiTab = "await";
 let formNoon = "regular", noonFilter = "all";
 const bulkSel = new Set();
 const NOON_T = {regular: "نون عادي", express: "نون اكسبريس"};
@@ -291,6 +291,7 @@ function setFormSite(s){ formSite = s; syncFormState(); render(); }
 function syncFormState(){
   const c = [...document.querySelectorAll(".codeInp")].map(i => i.value);
   if (c.length) formCodes = c;
+  const w = $("#wbChk"); if (w) withWaybill = w.checked;
 }
 function addCode(){
   syncFormState(); formCodes.push(""); skipSync = true; render();
@@ -300,14 +301,20 @@ function delCode(i){ syncFormState(); formCodes.splice(i, 1); if (!formCodes.len
 
 function submitOrder(){
   syncFormState();
+  const needTrk = withWaybill && OTO_SITES.includes(formSite);
   const image = $("#fImg").value.trim();
   const codes = formCodes.map(c => c.trim()).filter(Boolean).map(code => ({code, avail: null}));
+  const waybill = withWaybill ? $("#fWb").value.trim() : "";
+  const track = needTrk ? $("#fTrk").value.trim() : "";
   if (!image || !codes.length) return alert("أدخل رابط صورة الأوردر وكوداً واحداً على الأقل");
-  const rec = {site: formSite, image, codes, waybill: "", status: "pending", createdAt: Date.now()};
+  if (withWaybill && !/^https?:\/\//i.test(waybill)) return alert("أدخل رابط بوليصة الشحن PDF بشكل صحيح (يبدأ بـ http) أو ألغِ خيار إرسالها الآن");
+  if (needTrk && !track) return alert("أدخل رقم الطلب في أوتو OTO");
+  const rec = {site: formSite, image, codes, waybill, status: "pending", createdAt: Date.now()};
+  if (needTrk) rec.track = track;
   if (formSite === "Noon") rec.noonType = formNoon;
   db.ref("orders").push(rec);
-  formCodes = [""]; skipSync = true;
-  $("#fImg").value = "";
+  formCodes = [""]; withWaybill = false; skipSync = true;
+  ["#fImg", "#fWb", "#fTrk"].forEach(i => { if ($(i)) $(i).value = ""; });
   render();
 }
 function saveWaybill(id){
@@ -365,6 +372,9 @@ function renderAdmin(){
       <div class="flex gap-2"><input class="inp codeInp" value="${esc(c)}" placeholder="الكود ${i + 1}" dir="ltr">
       ${formCodes.length > 1 ? `<button class="tab" onclick="delCode(${i})">✕</button>` : ""}
       ${i === formCodes.length - 1 ? `<button class="btn" onclick="addCode()">+</button>` : ""}</div>`).join("")}</div>
+    <label class="flex items-center gap-2"><input id="wbChk" type="checkbox" ${withWaybill ? "checked" : ""} onchange="syncFormState();render()"> إرسال البوليصة الآن مع الأوردر</label>
+    ${withWaybill ? `<input id="fWb" class="inp" placeholder="رابط بوليصة الشحن PDF (إلزامي)" dir="ltr">` : ""}
+    ${withWaybill && OTO_SITES.includes(formSite) ? `<input id="fTrk" class="inp" placeholder="رقم الطلب في أوتو OTO - العمود A بالشيت (إلزامي)" dir="ltr">` : ""}
     <button class="btn w-full sm:w-auto" onclick="submitOrder()">إرسال الأوردر إلى الفرع</button>
   </div>
 
