@@ -300,26 +300,30 @@ function delCode(i){ syncFormState(); formCodes.splice(i, 1); if (!formCodes.len
 
 function submitOrder(){
   syncFormState();
-  const needTrk = OTO_SITES.includes(formSite);
   const image = $("#fImg").value.trim();
   const codes = formCodes.map(c => c.trim()).filter(Boolean).map(code => ({code, avail: null}));
-  const waybill = $("#fWb").value.trim();
-  const track = needTrk ? $("#fTrk").value.trim() : "";
   if (!image || !codes.length) return alert("أدخل رابط صورة الأوردر وكوداً واحداً على الأقل");
-  if (!/^https?:\/\//i.test(waybill)) return alert("أدخل رابط بوليصة الشحن PDF بشكل صحيح (يبدأ بـ http)");
-  if (needTrk && !track) return alert("أدخل رقم الطلب في أوتو OTO");
-  const rec = {site: formSite, image, codes, waybill, status: "pending", createdAt: Date.now()};
-  if (needTrk) rec.track = track;
+  const rec = {site: formSite, image, codes, waybill: "", status: "pending", createdAt: Date.now()};
   if (formSite === "Noon") rec.noonType = formNoon;
   db.ref("orders").push(rec);
   formCodes = [""]; skipSync = true;
-  ["#fImg", "#fWb", "#fTrk"].forEach(i => { if ($(i)) $(i).value = ""; });
+  $("#fImg").value = "";
   render();
 }
 function saveWaybill(id){
-  const v = $("#wb_" + id).value.trim();
-  if (!v) return alert("أدخل رابط البوليصة");
-  db.ref("orders/" + id + "/waybill").set(v);
+  const o = orders[id]; if (!o) return;
+  const v = $("#wb_" + id).value.trim(), needTrk = OTO_SITES.includes(o.site), t = needTrk ? $("#trk_" + id).value.trim() : "";
+  if (!/^https?:\/\//i.test(v)) return alert("أدخل رابط بوليصة الشحن PDF بشكل صحيح (يبدأ بـ http)");
+  if (needTrk && !t) return alert("أدخل رقم الطلب في أوتو OTO");
+  const upd = {waybill: v}; if (needTrk) upd.track = t;
+  db.ref("orders/" + id).update(upd);
+}
+function waybillForm(o){
+  if (o.site === "Noon") return `<div class="text-xs text-[var(--acc)]">بوليصتها تُضاف من قسم البوليصة الموحدة أسفل القائمة</div>`;
+  const oto = OTO_SITES.includes(o.site);
+  return `<input id="wb_${o.id}" class="inp" placeholder="رابط بوليصة الشحن PDF" dir="ltr">` +
+    (oto ? `<input id="trk_${o.id}" class="inp" placeholder="رقم الطلب في أوتو OTO (العمود A بالشيت)" dir="ltr">` : "") +
+    `<button class="btn gold w-full" onclick="saveWaybill('${o.id}')">${oto ? "إضافة البوليصة ورقم الطلب" : "إضافة البوليصة"}</button>`;
 }
 function deleteOrder(id){ if (confirm("حذف هذا الأوردر؟")) db.ref("orders/" + id).remove(); }
 
@@ -361,8 +365,6 @@ function renderAdmin(){
       <div class="flex gap-2"><input class="inp codeInp" value="${esc(c)}" placeholder="الكود ${i + 1}" dir="ltr">
       ${formCodes.length > 1 ? `<button class="tab" onclick="delCode(${i})">✕</button>` : ""}
       ${i === formCodes.length - 1 ? `<button class="btn" onclick="addCode()">+</button>` : ""}</div>`).join("")}</div>
-    <label class="block text-sm space-y-1"><span>رابط بوليصة الشحن PDF <b class="text-red-400">*</b></span><input id="fWb" class="inp" placeholder="رابط بوليصة الشحن PDF" dir="ltr"></label>
-    ${OTO_SITES.includes(formSite) ? `<label class="block text-sm space-y-1"><span>رقم الطلب في أوتو OTO (كما يظهر في العمود A بالشيت) <b class="text-red-400">*</b></span><input id="fTrk" class="inp" placeholder="رقم الطلب في OTO" dir="ltr"></label>` : ""}
     <button class="btn w-full sm:w-auto" onclick="submitOrder()">إرسال الأوردر إلى الفرع</button>
   </div>
 
@@ -374,8 +376,7 @@ function renderAdmin(){
       ${badge(o)}${imgHtml(o.image, "h-40")}
       <div class="text-xs text-[var(--acc)]">${statusLabel(o)}</div>
       <div class="space-y-1">${o.codes.map(c => `<div class="flex justify-between text-sm bg-black/40 rounded px-2 py-1"><span dir="ltr">${esc(c.code)}</span><span>${c.avail === true ? "✅ متوفر" : c.avail === false ? "❌ غير متوفر" : "—"}</span></div>`).join("")}</div>
-      ${trackBlock(o)}
-      ${o.status === "prepared" && !o.waybill && o.site === "Noon" ? `<div class="text-xs text-[var(--acc)]">بوليصتها تُضاف من قسم البوليصة الموحدة أسفل القائمة</div>` : ""}${o.status === "prepared" && !o.waybill && o.site !== "Noon" ? `<input id="wb_${o.id}" class="inp" placeholder="رابط البوليصة PDF" dir="ltr"><button class="btn gold w-full" onclick="saveWaybill('${o.id}')">إضافة البوليصة</button>` : ""}
+      ${o.status === "prepared" ? (o.waybill ? trackBlock(o) : waybillForm(o)) : ""}
       <button class="text-red-400 text-xs" onclick="deleteOrder('${o.id}')">حذف الأوردر</button>
     </div>`).join("") : `<p class="text-[#6b5a5e] col-span-full">لا توجد أوردرات في ${activeSite} حالياً.</p>`}
   </div>
