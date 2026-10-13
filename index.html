@@ -9,16 +9,18 @@
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
 <style>
-  body{font-family:'Segoe UI',Tahoma,Arial,sans-serif;background:#0d0a0b;color:#f3eaec}
-  .card{background:#1a1315;border:1px solid #3a2227;border-radius:14px}
-  .inp{background:#0d0a0b;border:1px solid #4a2a31;border-radius:10px;padding:.55rem .75rem;width:100%;color:#fff}
-  .inp:focus{outline:2px solid #a3243b;outline-offset:1px}
-  .btn{background:#7b1e2f;color:#fff;border-radius:10px;padding:.55rem 1rem;font-weight:600;transition:background .15s}
-  .btn:hover{background:#9a2a3f}
+  :root{--pri:#7b1e2f;--pritxt:#fff;--bg:#fff;--txt:#111;--card:#141011;--cardtxt:#f3eaec;--acc:#c9a24a;--acctxt:#1a1200}
+  body{font-family:'Segoe UI',Tahoma,Arial,sans-serif;background:var(--bg);color:var(--txt)}
+  .card{background:var(--card);color:var(--cardtxt);border:1px solid var(--pri);border-radius:14px}
+  .inp{background:#0d0a0b;border:1px solid var(--pri);border-radius:10px;padding:.55rem .75rem;width:100%;color:#fff}
+  .inp:focus{outline:2px solid var(--acc);outline-offset:1px}
+  input[type=color].inp{padding:2px;height:2.4rem;cursor:pointer}
+  .btn{background:var(--pri);color:var(--pritxt);border-radius:10px;padding:.55rem 1rem;font-weight:600;transition:filter .15s}
+  .btn:hover:not(:disabled){filter:brightness(1.25)}
   .btn:disabled{background:#2c2225;color:#7d6a6e;cursor:not-allowed}
-  .gold{background:#c9a24a;color:#1a1200}.gold:hover{background:#dbb55f}
-  .tab{border:1px solid #4a2a31;border-radius:10px;padding:.5rem .9rem;white-space:nowrap}
-  .tab.on{background:#7b1e2f;border-color:#a3243b;color:#fff}
+  .gold{background:var(--acc);color:var(--acctxt)}
+  .tab{background:var(--bg);color:var(--txt);border:1px solid var(--pri);border-radius:10px;padding:.5rem .9rem;white-space:nowrap}
+  .tab.on{background:var(--pri);border-color:var(--pri);color:var(--pritxt)}
 </style>
 </head>
 <body class="min-h-screen">
@@ -34,7 +36,6 @@ const firebaseConfig = {
 /* ============ إعدادات النظام ============ */
 const SITES = ["Amazon", "Noon", "Babolat", "Raed Sport", "Yonex"];
 const FIXED_SHIPPING = {"Babolat": 50, "Raed Sport": 50}; // قيمة الشحن الثابتة (غيّرها حسب الحاجة)
-const PINS = {admin: "1234", branch: "5678"};             // رموز الدخول (غيّرها)
 </script>
 
 <div id="app" class="max-w-6xl mx-auto p-3 sm:p-6"></div>
@@ -50,6 +51,10 @@ let activeSite = SITES[0];
 let formSite = SITES[0];
 let formCodes = [""];
 let withWaybill = false;
+let formNoon = "regular", noonFilter = "all";
+const bulkSel = new Set();
+const NOON_T = {regular: "نون عادي", express: "نون اكسبريس"};
+const typeOf = o => o.noonType || "regular";
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -60,11 +65,194 @@ db.ref("orders").on("value", s => { orders = s.val() || {}; render(); });
 function listenFinance(){ db.ref("finance").on("value", s => { finance = s.val() || {}; render(); }); }
 if (role === "admin") listenFinance();
 
+
+/* ============ الصور: تحويل روابط Google Drive + عرض مكبّر ============ */
+function imgSrc(u){
+  const m = String(u).match(/drive\.google\.com\/(?:file\/d\/|open\?id=|uc\?(?:export=\w+&)?id=)([\w-]+)/);
+  return m ? `https://drive.google.com/thumbnail?id=${m[1]}&sz=w2000` : u;
+}
+function imgHtml(u, h){
+  return `<img src="${safeUrl(imgSrc(u))}" data-o="${esc(u)}" referrerpolicy="no-referrer" loading="lazy" alt="صورة الأوردر"
+    onclick="openImg(this.src)" onerror="imgFail(this)" class="w-full ${h} object-contain bg-black rounded-lg cursor-zoom-in">
+    <div class="text-xs text-center text-[var(--acc)] -mt-1">اضغط على الصورة لتكبيرها</div>`;
+}
+function imgFail(el){
+  const o = el.dataset.o, a = document.createElement("a");
+  if (/^https?:\/\//i.test(o)) { a.href = o; a.target = "_blank"; a.rel = "noopener"; }
+  a.className = "block text-center text-sm text-[var(--acc)] bg-black rounded-lg p-4";
+  a.textContent = "تعذر عرض الصورة، اضغط لفتح الرابط";
+  el.replaceWith(a);
+}
+
+/* نافذة التكبير: عجلة الماوس / قرص بإصبعين / سحب / نقر مزدوج */
+let Z = {s: 1, x: 0, y: 0}, ptrs = new Map(), lastDist = 0;
+function applyZ(){
+  const i = document.getElementById("lbImg");
+  if (i) i.style.transform = `translate(-50%,-50%) translate(${Z.x}px,${Z.y}px) scale(${Z.s})`;
+}
+function zoomBy(f){ Z.s = Math.min(8, Math.max(1, Z.s * f)); if (Z.s === 1) { Z.x = 0; Z.y = 0; } applyZ(); }
+function closeImg(){ const o = document.getElementById("lb"); if (o) o.remove(); document.removeEventListener("keydown", escKey); }
+function escKey(e){ if (e.key === "Escape") closeImg(); }
+function openImg(src){
+  closeImg(); Z = {s: 1, x: 0, y: 0}; ptrs.clear();
+  const o = document.createElement("div");
+  o.id = "lb";
+  o.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.95);z-index:50;overflow:hidden;touch-action:none";
+  const b = "background:var(--pri);color:#fff;border-radius:10px;padding:.6rem 1.1rem;font-size:1.1rem";
+  o.innerHTML = `<img id="lbImg" src="${esc(src)}" referrerpolicy="no-referrer" draggable="false"
+      style="position:absolute;top:50%;left:50%;max-width:96vw;max-height:82vh;transform:translate(-50%,-50%);user-select:none;cursor:grab">
+    <div style="position:absolute;bottom:16px;left:0;right:0;display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
+      <button style="${b}" onclick="zoomBy(1.4)">＋</button><button style="${b}" onclick="zoomBy(1/1.4)">－</button>
+      <button style="${b}" onclick="Z={s:1,x:0,y:0};applyZ()">إعادة</button>
+      <a style="${b}" href="${esc(src)}" target="_blank" rel="noopener">فتح في تبويب</a>
+      <button style="${b};background:#fff;color:#111" onclick="closeImg()">إغلاق ✕</button></div>`;
+  o.addEventListener("wheel", e => { e.preventDefault(); zoomBy(e.deltaY < 0 ? 1.15 : 1 / 1.15); }, {passive: false});
+  o.addEventListener("dblclick", () => { Z.s = Z.s > 1 ? 1 : 2.5; if (Z.s === 1) { Z.x = 0; Z.y = 0; } applyZ(); });
+  o.addEventListener("pointerdown", e => { if (e.target === o) return closeImg(); ptrs.set(e.pointerId, {x: e.clientX, y: e.clientY}); o.setPointerCapture(e.pointerId); lastDist = 0; });
+  o.addEventListener("pointermove", e => {
+    if (!ptrs.has(e.pointerId)) return;
+    const prev = ptrs.get(e.pointerId); ptrs.set(e.pointerId, {x: e.clientX, y: e.clientY});
+    if (ptrs.size === 2) {
+      const [a, c] = [...ptrs.values()], d = Math.hypot(a.x - c.x, a.y - c.y);
+      if (lastDist) zoomBy(d / lastDist); lastDist = d;
+    } else if (ptrs.size === 1 && Z.s > 1) { Z.x += e.clientX - prev.x; Z.y += e.clientY - prev.y; applyZ(); }
+  });
+  const up = e => { ptrs.delete(e.pointerId); lastDist = 0; };
+  o.addEventListener("pointerup", up); o.addEventListener("pointercancel", up);
+  document.body.appendChild(o);
+  document.addEventListener("keydown", escKey);
+}
+
+
+/* ============ نون: النوع (عادي/اكسبريس) + بوليصة موحدة لكل نوع ============ */
+function setFormNoon(t){ syncFormState(); formNoon = t; render(); }
+function setNoonFilter(f){ noonFilter = f; render(); }
+function badge(o){
+  if (o.site !== "Noon") return "";
+  const c = typeColor(typeOf(o));
+  return `<span class="inline-block text-xs font-bold rounded px-2 py-1" style="background:${c};color:${inkOf(c)}">${NOON_T[typeOf(o)]}</span>`;
+}
+function noonBar(){
+  if (activeSite !== "Noon") return "";
+  const all = open().filter(o => o.site === "Noon");
+  const opts = [["all", "الكل", all.length], ["regular", NOON_T.regular, all.filter(o => typeOf(o) === "regular").length], ["express", NOON_T.express, all.filter(o => typeOf(o) === "express").length]];
+  return `<div class="flex gap-2 flex-wrap mt-1">${opts.map(([k, l, n]) => `<button class="tab text-sm ${k === noonFilter ? "on" : ""}" onclick="setNoonFilter('${k}')">${l} (${n})</button>`).join("")}</div>`;
+}
+const noonReady = t => open().filter(o => o.site === "Noon" && typeOf(o) === t && o.status === "prepared" && !o.waybill);
+function toggleBulk(id){ bulkSel.has(id) ? bulkSel.delete(id) : bulkSel.add(id); }
+function bulkAll(t){
+  const ids = noonReady(t).map(o => o.id), every = ids.every(i => bulkSel.has(i));
+  ids.forEach(i => every ? bulkSel.delete(i) : bulkSel.add(i)); render();
+}
+function applyBulk(t){
+  const url = $("#bw_" + t).value.trim(), ids = noonReady(t).map(o => o.id).filter(i => bulkSel.has(i));
+  if (!ids.length) return alert("حدد أوردراً واحداً على الأقل");
+  if (!/^https?:\/\//i.test(url)) return alert("أدخل رابط البوليصة بشكل صحيح");
+  const upd = {}; ids.forEach(i => upd["orders/" + i + "/waybill"] = url);
+  db.ref().update(upd); ids.forEach(i => bulkSel.delete(i)); $("#bw_" + t).value = "";
+}
+function bulkHtml(){
+  if (activeSite !== "Noon") return "";
+  return `<div class="card p-4 mb-8 space-y-4"><h2 class="font-bold">بوليصة موحدة لأوردرات نون</h2>` + Object.keys(NOON_T).map(t => {
+    const g = noonReady(t);
+    return `<div class="border border-[var(--pri)] rounded-lg p-3 space-y-2"><div class="font-bold text-[var(--acc)]">${NOON_T[t]} (${g.length} جاهز للبوليصة)</div>` +
+      (g.length ? `<button class="tab" onclick="bulkAll('${t}')">تحديد الكل / إلغاء التحديد</button>
+        <div class="flex flex-wrap gap-2">${g.map(o => `<label class="flex items-center gap-2 bg-black/40 rounded px-2 py-1 text-sm"><input type="checkbox" ${bulkSel.has(o.id) ? "checked" : ""} onchange="toggleBulk('${o.id}')"> <span dir="ltr">${esc(o.codes.map(c => c.code).join(" - "))}</span></label>`).join("")}</div>
+        <input id="bw_${t}" class="inp" placeholder="رابط بوليصة ${NOON_T[t]} PDF" dir="ltr">
+        <button class="btn gold w-full" onclick="applyBulk('${t}')">إرسال البوليصة للأوردرات المحددة</button>`
+      : `<p class="text-sm text-[#9b8a8e]">لا توجد أوردرات جاهزة. تظهر هنا بعد أن يضغط الموظف "تم التجهيز".</p>`) + `</div>`;
+  }).join("") + `</div>`;
+}
+
+
+/* ============ الإعدادات (تُحفظ في Firebase وتتزامن مع الفرع) ============ */
+const DEF = {
+  title: "شحنات المواقع",
+  pins: {admin: "1234", branch: "5678"},
+  colors: {pri: "#7b1e2f", bg: "#ffffff", card: "#141011", acc: "#c9a24a"},
+  noonExpress: "#c9a24a",
+  sites: {
+    "Amazon":     {color: "#f08a00", logo: "", pos: "side"},
+    "Noon":       {color: "#f7d117", logo: "", pos: "side"},
+    "Babolat":    {color: "#14284b", logo: "", pos: "side"},
+    "Raed Sport": {color: "#7b1e2f", logo: "", pos: "side"},
+    "Yonex":      {color: "#1b5e3a", logo: "", pos: "side"}
+  }
+};
+let S = JSON.parse(JSON.stringify(DEF)), settingsReady = false, view = "main", noKeep = false;
+const POS = {side: "بجانب الاسم", top: "فوق الاسم", bottom: "تحت الاسم"};
+
+function merge(a, b){
+  const o = Array.isArray(a) ? [...a] : {...a};
+  for (const k in b) o[k] = (b[k] && typeof b[k] === "object" && a && typeof a[k] === "object") ? merge(a[k], b[k]) : b[k];
+  return o;
+}
+function inkOf(h){
+  const m = /^#?([\da-f]{2})([\da-f]{2})([\da-f]{2})$/i.exec(h || "");
+  if (!m) return "#111";
+  const [r, g, b] = m.slice(1).map(x => parseInt(x, 16));
+  return (0.299 * r + 0.587 * g + 0.114 * b) > 150 ? "#111" : "#fff";
+}
+function applyTheme(){
+  const st = document.documentElement.style, c = S.colors;
+  st.setProperty("--pri", c.pri);  st.setProperty("--pritxt", inkOf(c.pri));
+  st.setProperty("--bg", c.bg);    st.setProperty("--txt", inkOf(c.bg));
+  st.setProperty("--card", c.card); st.setProperty("--cardtxt", inkOf(c.card) === "#111" ? "#111" : "#f3eaec");
+  st.setProperty("--acc", c.acc);  st.setProperty("--acctxt", inkOf(c.acc));
+  document.title = S.title;
+}
+db.ref("settings").on("value", snap => {
+  S = merge(DEF, snap.val() || {}); settingsReady = true; applyTheme(); render();
+});
+
+const typeColor = t => t === "express" ? S.noonExpress : S.sites.Noon.color;
+function pill(inner, color, on, click){
+  return `<button onclick="${click}" style="background:${color};color:${inkOf(color)};border:3px solid ${on ? "var(--txt)" : "transparent"};opacity:${on ? 1 : .7};border-radius:10px;padding:.4rem .8rem;white-space:nowrap;font-weight:700">${inner}</button>`;
+}
+/* تاب الموقع بلونه + اللوجو (فوق / تحت / بجانب الاسم) */
+function siteTab(s, on, click, n){
+  const c = S.sites[s] || {color: "#444", logo: "", pos: "side"};
+  const logo = c.logo ? `<img src="${safeUrl(imgSrc(c.logo))}" referrerpolicy="no-referrer" onerror="this.remove()" style="height:26px;max-width:90px;object-fit:contain">` : "";
+  const dir = c.pos === "top" ? "flex-col" : c.pos === "bottom" ? "flex-col-reverse" : "flex-row";
+  return pill(`<span class="inline-flex ${dir} items-center gap-2">${logo}<span>${esc(s)}${n != null ? ` (${n})` : ""}</span></span>`, c.color, on, click);
+}
+function setView(v){ view = v; render(); }
+
+function renderSettings(){
+  const f = (id, label, val, type = "text", ph = "") => `<label class="block text-sm space-y-1"><span>${label}</span><input id="${id}" type="${type}" value="${esc(val)}" placeholder="${ph}" class="inp" ${type === "text" ? 'dir="auto"' : ""}></label>`;
+  $("#app").innerHTML = header("إعدادات الموقع", `<button class="tab text-sm" onclick="setView('main')">رجوع</button>`) + `
+  <div class="card p-4 mb-4 space-y-3"><h2 class="font-bold">الاسم</h2>${f("st_title", "اسم النظام (يظهر في العنوان وشاشة الدخول)", S.title)}</div>
+  <div class="card p-4 mb-4"><h2 class="font-bold mb-2">كلمات المرور</h2>
+    <div class="grid sm:grid-cols-2 gap-3">${f("st_padmin", "كلمة مرور الإدارة", S.pins.admin)}${f("st_pbranch", "كلمة مرور الفرع", S.pins.branch)}</div></div>
+  <div class="card p-4 mb-4"><h2 class="font-bold mb-2">ألوان الموقع</h2>
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">${f("st_pri", "اللون الأساسي (الأزرار)", S.colors.pri, "color")}${f("st_bg", "خلفية الصفحة", S.colors.bg, "color")}${f("st_card", "خلفية الكروت", S.colors.card, "color")}${f("st_acc", "اللون الذهبي (البوليصة)", S.colors.acc, "color")}</div></div>
+  <div class="card p-4 mb-4 space-y-3"><h2 class="font-bold">المواقع (اللون واللوجو)</h2>
+    ${SITES.map((s, i) => { const c = S.sites[s]; return `<div class="border border-[var(--pri)] rounded-lg p-3 grid sm:grid-cols-[8rem_5rem_1fr_9rem] gap-3 items-end">
+      <div class="font-bold self-center">${esc(s)}</div>${f(`st_s${i}_c`, "اللون", c.color, "color")}${f(`st_s${i}_l`, "رابط اللوجو (اختياري)", c.logo, "text", "https://...png")}
+      <label class="block text-sm space-y-1"><span>مكان اللوجو</span><select id="st_s${i}_p" class="inp">${Object.entries(POS).map(([k, v]) => `<option value="${k}" ${c.pos === k ? "selected" : ""}>${v}</option>`).join("")}</select></label></div>`; }).join("")}
+    <div class="grid sm:grid-cols-[8rem_5rem] gap-3 items-end"><div class="font-bold self-center">نون اكسبريس</div>${f("st_nx", "اللون", S.noonExpress, "color")}</div></div>
+  <div class="flex gap-2"><button class="btn" onclick="saveSettings()">حفظ الإعدادات</button><button class="tab" onclick="resetSettings()">استعادة الافتراضي</button></div>`;
+}
+function saveSettings(){
+  const g = id => $("#" + id).value.trim(), pa = g("st_padmin"), pb = g("st_pbranch");
+  if (pa.length < 4 || pb.length < 4) return alert("كلمة المرور لا تقل عن 4 أحرف");
+  if (pa === pb) return alert("اجعل كلمتي مرور الإدارة والفرع مختلفتين");
+  const sites = {};
+  SITES.forEach((s, i) => sites[s] = {color: g(`st_s${i}_c`), logo: g(`st_s${i}_l`), pos: g(`st_s${i}_p`)});
+  db.ref("settings").set({title: g("st_title") || DEF.title, pins: {admin: pa, branch: pb},
+    colors: {pri: g("st_pri"), bg: g("st_bg"), card: g("st_card"), acc: g("st_acc")}, noonExpress: g("st_nx"), sites})
+    .then(() => alert("تم حفظ الإعدادات")).catch(e => alert("تعذر الحفظ: " + e.message));
+}
+function resetSettings(){
+  if (!confirm("استعادة كل الإعدادات الافتراضية؟ (كلمات المرور ترجع 1234 و 5678)")) return;
+  noKeep = true; db.ref("settings").remove();
+}
+
 /* ============ تسجيل الدخول ============ */
 function renderLogin(){
   $("#app").innerHTML = `
   <div class="card max-w-sm mx-auto mt-16 p-6 space-y-4">
-    <h1 class="text-xl font-bold text-center">طلبات شحن فرع السعودية</h1>
+    <h1 class="text-xl font-bold text-center">${esc(S.title)}</h1>
     <select id="lrole" class="inp"><option value="admin">حساب الإدارة</option><option value="branch">حساب فرع السعودية</option></select>
     <input id="lpin" type="password" class="inp" placeholder="رمز الدخول">
     <button class="btn w-full" onclick="login()">دخول</button>
@@ -73,7 +261,8 @@ function renderLogin(){
 }
 function login(){
   const r = $("#lrole").value;
-  if ($("#lpin").value !== PINS[r]) { $("#lerr").textContent = "رمز الدخول غير صحيح"; return; }
+  if (!settingsReady) { $("#lerr").textContent = "جاري الاتصال بقاعدة البيانات... أعد المحاولة بعد ثوانٍ"; return; }
+  if ($("#lpin").value !== S.pins[r]) { $("#lerr").textContent = "رمز الدخول غير صحيح"; return; }
   role = r; sessionStorage.setItem("role", r);
   if (r === "admin") listenFinance();
   render();
@@ -86,14 +275,11 @@ const open = () => list().filter(o => o.status !== "shipped");
 const statusLabel = o => o.status === "pending" ? "في انتظار التجهيز" : (o.waybill ? "جاهز للطباعة والشحن" : "في انتظار البوليصة من الإدارة");
 
 function tabsHtml(current, fn){
-  return `<div class="flex gap-2 overflow-x-auto pb-2">` + SITES.map(s => {
-    const n = open().filter(o => o.site === s).length;
-    return `<button class="tab ${s === current ? "on" : ""}" onclick="${fn}('${s}')">${s} (${n})</button>`;
-  }).join("") + `</div>`;
+  return `<div class="flex gap-2 overflow-x-auto pb-2">` + SITES.map(s => siteTab(s, s === current, `${fn}('${s}')`, open().filter(o => o.site === s).length)).join("") + `</div>`;
 }
-function header(title){
-  return `<div class="flex items-center justify-between mb-4"><h1 class="text-lg sm:text-2xl font-bold">${title}</h1>
-  <button class="tab text-sm" onclick="logout()">خروج</button></div>`;
+function header(title, extra = ""){
+  return `<div class="flex items-center justify-between gap-2 mb-4"><h1 class="text-lg sm:text-2xl font-bold">${esc(title)}</h1>
+  <div class="flex gap-2">${extra}<button class="tab text-sm" onclick="logout()">خروج</button></div></div>`;
 }
 
 /* ============ شاشة الإدارة ============ */
@@ -114,7 +300,9 @@ function submitOrder(){
   const waybill = withWaybill ? $("#fWb").value.trim() : "";
   if (!image || !codes.length) return alert("أدخل رابط صورة الأوردر وكوداً واحداً على الأقل");
   if (withWaybill && !waybill) return alert("أدخل رابط البوليصة أو ألغِ خيار إرسالها الآن");
-  db.ref("orders").push({site: formSite, image, codes, waybill, status: "pending", createdAt: Date.now()});
+  const rec = {site: formSite, image, codes, waybill, status: "pending", createdAt: Date.now()};
+  if (formSite === "Noon") rec.noonType = formNoon;
+  db.ref("orders").push(rec);
   formCodes = [""]; withWaybill = false; render();
 }
 function saveWaybill(id){
@@ -146,14 +334,16 @@ function saveFinance(){
 function deleteFin(id){ if (confirm("حذف هذا السطر؟")) db.ref("finance/" + id).remove(); }
 
 function renderAdmin(){
-  const items = open().filter(o => o.site === activeSite);
+  if (view === "settings") return renderSettings();
+  const items = open().filter(o => o.site === activeSite && (activeSite !== "Noon" || noonFilter === "all" || typeOf(o) === noonFilter));
   const finRows = Object.entries(finance).map(([id, f]) => ({id, ...f})).sort((a, b) => b.createdAt - a.createdAt);
   const grand = finRows.reduce((t, f) => t + (f.total || 0), 0);
 
-  $("#app").innerHTML = header("لوحة الإدارة") + `
+  $("#app").innerHTML = header(S.title + " - الإدارة", `<button class="tab text-sm" onclick="setView('settings')">⚙️ الإعدادات</button>`) + `
   <div class="card p-4 mb-5 space-y-3">
     <h2 class="font-bold">إرسال أوردر جديد</h2>
-    <div class="flex gap-2 flex-wrap">${SITES.map(s => `<button class="tab ${s === formSite ? "on" : ""}" onclick="setFormSite('${s}')">${s}</button>`).join("")}</div>
+    <div class="flex gap-2 flex-wrap">${SITES.map(s => siteTab(s, s === formSite, `setFormSite('${s}')`)).join("")}</div>
+    ${formSite === "Noon" ? `<div class="flex gap-2">${Object.entries(NOON_T).map(([k, v]) => `${pill(v, typeColor(k), k === formNoon, `setFormNoon('${k}')`)}`).join("")}</div>` : ""}
     <input id="fImg" class="inp" placeholder="رابط صورة الأوردر" dir="ltr">
     <div class="space-y-2">${formCodes.map((c, i) => `
       <div class="flex gap-2"><input class="inp codeInp" value="${esc(c)}" placeholder="الكود ${i + 1}" dir="ltr">
@@ -165,18 +355,19 @@ function renderAdmin(){
   </div>
 
   <h2 class="font-bold mb-2">الأوردرات الحالية</h2>
-  ${tabsHtml(activeSite, "setSite")}
+  ${tabsHtml(activeSite, "setSite")}${noonBar()}
   <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 mt-2 mb-8">
   ${items.length ? items.map(o => `
     <div class="card p-3 space-y-2">
-      <img src="${safeUrl(o.image)}" class="w-full h-40 object-contain bg-black rounded-lg" alt="صورة الأوردر">
-      <div class="text-xs text-[#c9a24a]">${statusLabel(o)}</div>
+      ${badge(o)}${imgHtml(o.image, "h-40")}
+      <div class="text-xs text-[var(--acc)]">${statusLabel(o)}</div>
       <div class="space-y-1">${o.codes.map(c => `<div class="flex justify-between text-sm bg-black/40 rounded px-2 py-1"><span dir="ltr">${esc(c.code)}</span><span>${c.avail === true ? "✅ متوفر" : c.avail === false ? "❌ غير متوفر" : "—"}</span></div>`).join("")}</div>
-      ${o.status === "prepared" && !o.waybill ? `<input id="wb_${o.id}" class="inp" placeholder="رابط البوليصة PDF" dir="ltr"><button class="btn gold w-full" onclick="saveWaybill('${o.id}')">إضافة البوليصة</button>` : ""}
+      ${o.status === "prepared" && !o.waybill && o.site === "Noon" ? `<div class="text-xs text-[var(--acc)]">بوليصتها تُضاف من قسم البوليصة الموحدة أسفل القائمة</div>` : ""}${o.status === "prepared" && !o.waybill && o.site !== "Noon" ? `<input id="wb_${o.id}" class="inp" placeholder="رابط البوليصة PDF" dir="ltr"><button class="btn gold w-full" onclick="saveWaybill('${o.id}')">إضافة البوليصة</button>` : ""}
       <button class="text-red-400 text-xs" onclick="deleteOrder('${o.id}')">حذف الأوردر</button>
-    </div>`).join("") : `<p class="text-[#9b8a8e] col-span-full">لا توجد أوردرات في ${activeSite} حالياً.</p>`}
+    </div>`).join("") : `<p class="text-[#6b5a5e] col-span-full">لا توجد أوردرات في ${activeSite} حالياً.</p>`}
   </div>
 
+  ${bulkHtml()}
   <div class="card p-4 space-y-3">
     <h2 class="font-bold">التقرير المالي (للإدارة فقط)</h2>
     <div class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2 items-end">
@@ -191,9 +382,9 @@ function renderAdmin(){
     </div>
     <button class="btn" onclick="saveFinance()">حفظ في التقرير</button>
     <div class="overflow-x-auto"><table class="w-full text-sm text-center">
-      <thead class="text-[#c9a24a]"><tr><th class="p-2">الموقع</th><th>رقم الأوردر</th><th>العميل</th><th>التاريخ</th><th>المجموع</th><th>الشحن</th><th>الخصم</th><th>الإجمالي</th><th></th></tr></thead>
+      <thead class="text-[var(--acc)]"><tr><th class="p-2">الموقع</th><th>رقم الأوردر</th><th>العميل</th><th>التاريخ</th><th>المجموع</th><th>الشحن</th><th>الخصم</th><th>الإجمالي</th><th></th></tr></thead>
       <tbody>${finRows.map(f => `<tr class="border-t border-[#3a2227]"><td class="p-2">${esc(f.site)}</td><td>${esc(f.no)}</td><td>${esc(f.name)}</td><td>${esc(f.date)}</td><td>${f.sum}</td><td>${f.ship}</td><td>${f.disc}</td><td class="font-bold">${f.total}</td><td><button class="text-red-400" onclick="deleteFin('${f.id}')">✕</button></td></tr>`).join("")}</tbody>
-      <tfoot><tr class="border-t border-[#7b1e2f] font-bold"><td colspan="7" class="p-2 text-left">إجمالي التقرير</td><td>${grand.toFixed(2)}</td><td></td></tr></tfoot>
+      <tfoot><tr class="border-t border-[var(--pri)] font-bold"><td colspan="7" class="p-2 text-left">إجمالي التقرير</td><td>${grand.toFixed(2)}</td><td></td></tr></tfoot>
     </table></div>
   </div>`;
   if ($("#ftSite")) onFinSite();
@@ -205,14 +396,14 @@ function prepared(id){ db.ref(`orders/${id}/status`).set("prepared"); }
 function shipped(id){ if (confirm("تأكيد الشحن النهائي؟ سيختفي الأوردر من شاشتك.")) db.ref(`orders/${id}/status`).set("shipped"); }
 
 function renderBranch(){
-  const items = open().filter(o => o.site === activeSite);
-  $("#app").innerHTML = header("فرع السعودية - المستودع") + tabsHtml(activeSite, "setSite") + `
+  const items = open().filter(o => o.site === activeSite && (activeSite !== "Noon" || noonFilter === "all" || typeOf(o) === noonFilter));
+  $("#app").innerHTML = header(S.title + " - المستودع") + tabsHtml(activeSite, "setSite") + noonBar() + `
   <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 mt-2">
   ${items.length ? items.map(o => {
     const allMarked = o.codes.every(c => c.avail === true || c.avail === false);
     const isPrepared = o.status === "prepared";
     return `<div class="card p-3 space-y-3">
-      <img src="${safeUrl(o.image)}" class="w-full h-48 object-contain bg-black rounded-lg" alt="صورة الأوردر">
+      ${badge(o)}${imgHtml(o.image, "h-48")}
       ${o.codes.map((c, i) => `
         <div class="bg-black/40 rounded-lg p-2">
           <div class="font-mono mb-2" dir="ltr">${esc(c.code)}</div>
@@ -221,9 +412,9 @@ function renderBranch(){
             <button ${isPrepared ? "disabled" : ""} class="btn ${c.avail === false ? "" : "opacity-60"}" style="${c.avail === false ? "background:#b3261e" : ""}" onclick="mark('${o.id}',${i},false)">غير متوفر ❌</button>
           </div></div>`).join("")}
       ${!isPrepared ? `<button class="btn w-full" ${allMarked ? "" : "disabled"} onclick="prepared('${o.id}')">تم التجهيز</button>` : ""}
-      ${o.waybill ? `<a class="btn gold block text-center" target="_blank" rel="noopener" href="${safeUrl(o.waybill)}">فتح وطباعة بوليصة الشحن PDF</a>` : (isPrepared ? `<p class="text-sm text-[#c9a24a] text-center">تم الإرسال للإدارة، في انتظار إضافة البوليصة...</p>` : "")}
+      ${o.waybill ? `<a class="btn gold block text-center" target="_blank" rel="noopener" href="${safeUrl(o.waybill)}">فتح وطباعة بوليصة الشحن PDF</a>` : (isPrepared ? `<p class="text-sm text-[var(--acc)] text-center">تم الإرسال للإدارة، في انتظار إضافة البوليصة...</p>` : "")}
       ${isPrepared && o.waybill ? `<button class="btn w-full" onclick="shipped('${o.id}')">تم الشحن النهائي</button>` : ""}
-    </div>`;}).join("") : `<p class="text-[#9b8a8e] col-span-full">لا توجد أوردرات في ${activeSite} حالياً.</p>`}
+    </div>`;}).join("") : `<p class="text-[#6b5a5e] col-span-full">لا توجد أوردرات في ${activeSite} حالياً.</p>`}
   </div>`;
 }
 
@@ -237,7 +428,8 @@ function render(){
 
   if (!role) renderLogin(); else if (role === "admin") renderAdmin(); else renderBranch();
 
-  Object.entries(keep).forEach(([id, v]) => { const e = document.getElementById(id); if (e && id !== "ftTotal" && id !== "lpin") e.value = v; });
+  if (!noKeep) Object.entries(keep).forEach(([id, v]) => { const e = document.getElementById(id); if (e && id !== "ftTotal" && id !== "lpin") e.value = v; });
+  noKeep = false;
   if (role === "admin" && $("#ftSite")) calcTotal();
   if (focusId && document.getElementById(focusId)) document.getElementById(focusId).focus();
 }
