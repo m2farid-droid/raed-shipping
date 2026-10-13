@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>نظام طلبات شحن فرع السعودية</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<!-- مكتبات Firebase (النسخة المتوافقة compat) -->
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+<style>
+  body{font-family:'Segoe UI',Tahoma,Arial,sans-serif;background:#0d0a0b;color:#f3eaec}
+  .card{background:#1a1315;border:1px solid #3a2227;border-radius:14px}
+  .inp{background:#0d0a0b;border:1px solid #4a2a31;border-radius:10px;padding:.55rem .75rem;width:100%;color:#fff}
+  .inp:focus{outline:2px solid #a3243b;outline-offset:1px}
+  .btn{background:#7b1e2f;color:#fff;border-radius:10px;padding:.55rem 1rem;font-weight:600;transition:background .15s}
+  .btn:hover{background:#9a2a3f}
+  .btn:disabled{background:#2c2225;color:#7d6a6e;cursor:not-allowed}
+  .gold{background:#c9a24a;color:#1a1200}.gold:hover{background:#dbb55f}
+  .tab{border:1px solid #4a2a31;border-radius:10px;padding:.5rem .9rem;white-space:nowrap}
+  .tab.on{background:#7b1e2f;border-color:#a3243b;color:#fff}
+</style>
+</head>
+<body class="min-h-screen">
+
+<script>
+/* ============ إعدادات Firebase: استبدل القيم بقيم مشروعك ============ */
+const firebaseConfig = {
+  apiKey: "YOUR_API_KEY",
+  authDomain: "YOUR_PROJECT.firebaseapp.com",
+  databaseURL: "https://YOUR_PROJECT-default-rtdb.firebaseio.com",
+  projectId: "YOUR_PROJECT"
+};
+/* ============ إعدادات النظام ============ */
+const SITES = ["Amazon", "Noon", "Babolat", "Raed Sport", "Yonex"];
+const FIXED_SHIPPING = {"Babolat": 50, "Raed Sport": 50}; // قيمة الشحن الثابتة (غيّرها حسب الحاجة)
+const PINS = {admin: "1234", branch: "5678"};             // رموز الدخول (غيّرها)
+</script>
+
+<div id="app" class="max-w-6xl mx-auto p-3 sm:p-6"></div>
+
+<script>
+firebase.initializeApp(firebaseConfig);
+const db = firebase.database();
+
+/* ============ الحالة العامة ============ */
+let role = sessionStorage.getItem("role") || null;
+let orders = {}, finance = {};
+let activeSite = SITES[0];
+let formSite = SITES[0];
+let formCodes = [""];
+let withWaybill = false;
+
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const safeUrl = u => /^https?:\/\//i.test(u) ? esc(u) : "#";
+
+/* ============ المزامنة اللحظية ============ */
+db.ref("orders").on("value", s => { orders = s.val() || {}; render(); });
+function listenFinance(){ db.ref("finance").on("value", s => { finance = s.val() || {}; render(); }); }
+if (role === "admin") listenFinance();
+
+/* ============ تسجيل الدخول ============ */
+function renderLogin(){
+  $("#app").innerHTML = `
+  <div class="card max-w-sm mx-auto mt-16 p-6 space-y-4">
+    <h1 class="text-xl font-bold text-center">طلبات شحن فرع السعودية</h1>
+    <select id="lrole" class="inp"><option value="admin">حساب الإدارة</option><option value="branch">حساب فرع السعودية</option></select>
+    <input id="lpin" type="password" class="inp" placeholder="رمز الدخول">
+    <button class="btn w-full" onclick="login()">دخول</button>
+    <p id="lerr" class="text-red-400 text-sm text-center"></p>
+  </div>`;
+}
+function login(){
+  const r = $("#lrole").value;
+  if ($("#lpin").value !== PINS[r]) { $("#lerr").textContent = "رمز الدخول غير صحيح"; return; }
+  role = r; sessionStorage.setItem("role", r);
+  if (r === "admin") listenFinance();
+  render();
+}
+function logout(){ sessionStorage.removeItem("role"); location.reload(); }
+
+/* ============ أدوات مشتركة ============ */
+const list = () => Object.entries(orders).map(([id, o]) => ({id, ...o})).sort((a, b) => b.createdAt - a.createdAt);
+const open = () => list().filter(o => o.status !== "shipped");
+const statusLabel = o => o.status === "pending" ? "في انتظار التجهيز" : (o.waybill ? "جاهز للطباعة والشحن" : "في انتظار البوليصة من الإدارة");
+
+function tabsHtml(current, fn){
+  return `<div class="flex gap-2 overflow-x-auto pb-2">` + SITES.map(s => {
+    const n = open().filter(o => o.site === s).length;
+    return `<button class="tab ${s === current ? "on" : ""}" onclick="${fn}('${s}')">${s} (${n})</button>`;
+  }).join("") + `</div>`;
+}
+function header(title){
+  return `<div class="flex items-center justify-between mb-4"><h1 class="text-lg sm:text-2xl font-bold">${title}</h1>
+  <button class="tab text-sm" onclick="logout()">خروج</button></div>`;
+}
+
+/* ============ شاشة الإدارة ============ */
+function setSite(s){ activeSite = s; render(); }
+function setFormSite(s){ formSite = s; syncFormState(); render(); }
+function syncFormState(){
+  const c = [...document.querySelectorAll(".codeInp")].map(i => i.value);
+  if (c.length) formCodes = c;
+  const w = $("#wbChk"); if (w) withWaybill = w.checked;
+}
+function addCode(){ syncFormState(); formCodes.push(""); render(); }
+function delCode(i){ syncFormState(); formCodes.splice(i, 1); if (!formCodes.length) formCodes = [""]; render(); }
+
+function submitOrder(){
+  syncFormState();
+  const image = $("#fImg").value.trim();
+  const codes = formCodes.map(c => c.trim()).filter(Boolean).map(code => ({code, avail: null}));
+  const waybill = withWaybill ? $("#fWb").value.trim() : "";
+  if (!image || !codes.length) return alert("أدخل رابط صورة الأوردر وكوداً واحداً على الأقل");
+  if (withWaybill && !waybill) return alert("أدخل رابط البوليصة أو ألغِ خيار إرسالها الآن");
+  db.ref("orders").push({site: formSite, image, codes, waybill, status: "pending", createdAt: Date.now()});
+  formCodes = [""]; withWaybill = false; render();
+}
+function saveWaybill(id){
+  const v = $("#wb_" + id).value.trim();
+  if (!v) return alert("أدخل رابط البوليصة");
+  db.ref("orders/" + id + "/waybill").set(v);
+}
+function deleteOrder(id){ if (confirm("حذف هذا الأوردر؟")) db.ref("orders/" + id).remove(); }
+
+/* حساب الإجمالي: مجموع الأوردر + الشحن - الخصم */
+function calcTotal(){
+  const g = id => parseFloat($(id).value) || 0;
+  $("#ftTotal").value = (g("#ftSum") + g("#ftShip") - g("#ftDisc")).toFixed(2);
+}
+function onFinSite(){
+  const s = $("#ftSite").value;
+  $("#ftShip").value = FIXED_SHIPPING[s] ?? 0;   // الشحن تلقائي: ثابت لـ Babolat/Raed Sport وصفر للباقي
+  calcTotal();
+}
+function saveFinance(){
+  const no = $("#ftNo").value.trim(), name = $("#ftName").value.trim();
+  if (!no || !name) return alert("أدخل رقم الأوردر واسم العميل");
+  const sum = parseFloat($("#ftSum").value) || 0, ship = parseFloat($("#ftShip").value) || 0, disc = parseFloat($("#ftDisc").value) || 0;
+  db.ref("finance").push({site: $("#ftSite").value, no, name, date: $("#ftDate").value || new Date().toISOString().slice(0, 10),
+    sum, ship, disc, total: sum + ship - disc, createdAt: Date.now()});
+  ["#ftNo", "#ftName", "#ftSum", "#ftDisc"].forEach(i => $(i).value = "");
+  calcTotal();
+}
+function deleteFin(id){ if (confirm("حذف هذا السطر؟")) db.ref("finance/" + id).remove(); }
+
+function renderAdmin(){
+  const items = open().filter(o => o.site === activeSite);
+  const finRows = Object.entries(finance).map(([id, f]) => ({id, ...f})).sort((a, b) => b.createdAt - a.createdAt);
+  const grand = finRows.reduce((t, f) => t + (f.total || 0), 0);
+
+  $("#app").innerHTML = header("لوحة الإدارة") + `
+  <div class="card p-4 mb-5 space-y-3">
+    <h2 class="font-bold">إرسال أوردر جديد</h2>
+    <div class="flex gap-2 flex-wrap">${SITES.map(s => `<button class="tab ${s === formSite ? "on" : ""}" onclick="setFormSite('${s}')">${s}</button>`).join("")}</div>
+    <input id="fImg" class="inp" placeholder="رابط صورة الأوردر" dir="ltr">
+    <div class="space-y-2">${formCodes.map((c, i) => `
+      <div class="flex gap-2"><input class="inp codeInp" value="${esc(c)}" placeholder="الكود ${i + 1}" dir="ltr">
+      ${formCodes.length > 1 ? `<button class="tab" onclick="delCode(${i})">✕</button>` : ""}
+      ${i === formCodes.length - 1 ? `<button class="btn" onclick="addCode()">+</button>` : ""}</div>`).join("")}</div>
+    <label class="flex items-center gap-2"><input id="wbChk" type="checkbox" ${withWaybill ? "checked" : ""} onchange="syncFormState();render()"> إرسال البوليصة الآن مع الأوردر</label>
+    ${withWaybill ? `<input id="fWb" class="inp" placeholder="رابط بوليصة PDF على Google Drive" dir="ltr">` : ""}
+    <button class="btn w-full sm:w-auto" onclick="submitOrder()">إرسال الأوردر إلى الفرع</button>
+  </div>
+
+  <h2 class="font-bold mb-2">الأوردرات الحالية</h2>
+  ${tabsHtml(activeSite, "setSite")}
+  <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 mt-2 mb-8">
+  ${items.length ? items.map(o => `
+    <div class="card p-3 space-y-2">
+      <img src="${safeUrl(o.image)}" class="w-full h-40 object-contain bg-black rounded-lg" alt="صورة الأوردر">
+      <div class="text-xs text-[#c9a24a]">${statusLabel(o)}</div>
+      <div class="space-y-1">${o.codes.map(c => `<div class="flex justify-between text-sm bg-black/40 rounded px-2 py-1"><span dir="ltr">${esc(c.code)}</span><span>${c.avail === true ? "✅ متوفر" : c.avail === false ? "❌ غير متوفر" : "—"}</span></div>`).join("")}</div>
+      ${o.status === "prepared" && !o.waybill ? `<input id="wb_${o.id}" class="inp" placeholder="رابط البوليصة PDF" dir="ltr"><button class="btn gold w-full" onclick="saveWaybill('${o.id}')">إضافة البوليصة</button>` : ""}
+      <button class="text-red-400 text-xs" onclick="deleteOrder('${o.id}')">حذف الأوردر</button>
+    </div>`).join("") : `<p class="text-[#9b8a8e] col-span-full">لا توجد أوردرات في ${activeSite} حالياً.</p>`}
+  </div>
+
+  <div class="card p-4 space-y-3">
+    <h2 class="font-bold">التقرير المالي (للإدارة فقط)</h2>
+    <div class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2 items-end">
+      <select id="ftSite" class="inp" onchange="onFinSite()">${SITES.map(s => `<option>${s}</option>`).join("")}</select>
+      <input id="ftNo" class="inp" placeholder="رقم الأوردر">
+      <input id="ftName" class="inp" placeholder="اسم العميل">
+      <input id="ftDate" type="date" class="inp">
+      <input id="ftSum" type="number" step="0.01" class="inp" placeholder="مجموع الأوردر" oninput="calcTotal()">
+      <input id="ftShip" type="number" step="0.01" class="inp" placeholder="الشحن" value="0" oninput="calcTotal()">
+      <input id="ftDisc" type="number" step="0.01" class="inp" placeholder="خصم (اختياري)" oninput="calcTotal()">
+      <input id="ftTotal" class="inp" placeholder="الإجمالي" readonly>
+    </div>
+    <button class="btn" onclick="saveFinance()">حفظ في التقرير</button>
+    <div class="overflow-x-auto"><table class="w-full text-sm text-center">
+      <thead class="text-[#c9a24a]"><tr><th class="p-2">الموقع</th><th>رقم الأوردر</th><th>العميل</th><th>التاريخ</th><th>المجموع</th><th>الشحن</th><th>الخصم</th><th>الإجمالي</th><th></th></tr></thead>
+      <tbody>${finRows.map(f => `<tr class="border-t border-[#3a2227]"><td class="p-2">${esc(f.site)}</td><td>${esc(f.no)}</td><td>${esc(f.name)}</td><td>${esc(f.date)}</td><td>${f.sum}</td><td>${f.ship}</td><td>${f.disc}</td><td class="font-bold">${f.total}</td><td><button class="text-red-400" onclick="deleteFin('${f.id}')">✕</button></td></tr>`).join("")}</tbody>
+      <tfoot><tr class="border-t border-[#7b1e2f] font-bold"><td colspan="7" class="p-2 text-left">إجمالي التقرير</td><td>${grand.toFixed(2)}</td><td></td></tr></tfoot>
+    </table></div>
+  </div>`;
+  if ($("#ftSite")) onFinSite();
+}
+
+/* ============ شاشة فرع السعودية ============ */
+function mark(id, i, val){ db.ref(`orders/${id}/codes/${i}/avail`).set(val); }
+function prepared(id){ db.ref(`orders/${id}/status`).set("prepared"); }
+function shipped(id){ if (confirm("تأكيد الشحن النهائي؟ سيختفي الأوردر من شاشتك.")) db.ref(`orders/${id}/status`).set("shipped"); }
+
+function renderBranch(){
+  const items = open().filter(o => o.site === activeSite);
+  $("#app").innerHTML = header("فرع السعودية - المستودع") + tabsHtml(activeSite, "setSite") + `
+  <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 mt-2">
+  ${items.length ? items.map(o => {
+    const allMarked = o.codes.every(c => c.avail === true || c.avail === false);
+    const isPrepared = o.status === "prepared";
+    return `<div class="card p-3 space-y-3">
+      <img src="${safeUrl(o.image)}" class="w-full h-48 object-contain bg-black rounded-lg" alt="صورة الأوردر">
+      ${o.codes.map((c, i) => `
+        <div class="bg-black/40 rounded-lg p-2">
+          <div class="font-mono mb-2" dir="ltr">${esc(c.code)}</div>
+          <div class="grid grid-cols-2 gap-2">
+            <button ${isPrepared ? "disabled" : ""} class="btn ${c.avail === true ? "" : "opacity-60"}" style="${c.avail === true ? "background:#1f7a46" : ""}" onclick="mark('${o.id}',${i},true)">متوفر ✅</button>
+            <button ${isPrepared ? "disabled" : ""} class="btn ${c.avail === false ? "" : "opacity-60"}" style="${c.avail === false ? "background:#b3261e" : ""}" onclick="mark('${o.id}',${i},false)">غير متوفر ❌</button>
+          </div></div>`).join("")}
+      ${!isPrepared ? `<button class="btn w-full" ${allMarked ? "" : "disabled"} onclick="prepared('${o.id}')">تم التجهيز</button>` : ""}
+      ${o.waybill ? `<a class="btn gold block text-center" target="_blank" rel="noopener" href="${safeUrl(o.waybill)}">فتح وطباعة بوليصة الشحن PDF</a>` : (isPrepared ? `<p class="text-sm text-[#c9a24a] text-center">تم الإرسال للإدارة، في انتظار إضافة البوليصة...</p>` : "")}
+      ${isPrepared && o.waybill ? `<button class="btn w-full" onclick="shipped('${o.id}')">تم الشحن النهائي</button>` : ""}
+    </div>`;}).join("") : `<p class="text-[#9b8a8e] col-span-full">لا توجد أوردرات في ${activeSite} حالياً.</p>`}
+  </div>`;
+}
+
+/* ============ العرض الرئيسي ============ */
+function render(){
+  /* حفظ ما كُتب في الحقول قبل إعادة الرسم حتى لا يضيع عند وصول تحديث لحظي */
+  const keep = {};
+  document.querySelectorAll("#app input[id], #app select[id]").forEach(e => keep[e.id] = e.value);
+  const focusId = document.activeElement && document.activeElement.id;
+  if (role === "admin") syncFormState();
+
+  if (!role) renderLogin(); else if (role === "admin") renderAdmin(); else renderBranch();
+
+  Object.entries(keep).forEach(([id, v]) => { const e = document.getElementById(id); if (e && id !== "ftTotal" && id !== "lpin") e.value = v; });
+  if (role === "admin" && $("#ftSite")) calcTotal();
+  if (focusId && document.getElementById(focusId)) document.getElementById(focusId).focus();
+}
+render();
+</script>
+</body>
+</html>
