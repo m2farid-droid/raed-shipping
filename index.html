@@ -8,8 +8,6 @@
 <!-- مكتبات Firebase (النسخة المتوافقة compat) -->
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
-<!-- قراءة ملفات Excel -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
   :root{--pri:#7b1e2f;--pritxt:#fff;--bg:#fff;--txt:#111;--card:#141011;--cardtxt:#f3eaec;--acc:#c9a24a;--acctxt:#1a1200}
   body{font-family:'Segoe UI',Tahoma,Arial,sans-serif;background:var(--bg);color:var(--txt)}
@@ -38,7 +36,6 @@ const firebaseConfig = {
 /* ============ إعدادات النظام ============ */
 const SITES = ["Amazon", "Noon", "Babolat", "Raed Sport", "Yonex"];
 const FIXED_SHIPPING = {"Babolat": 50, "Raed Sport": 50}; // قيمة الشحن الثابتة (غيّرها حسب الحاجة)
-const OTO_SITES = ["Babolat", "Raed Sport", "Yonex"];      // القنوات المرتبطة بتتبع OTO (شحن Amazon و Noon ذاتي)
 </script>
 
 <div id="app" class="max-w-6xl mx-auto p-3 sm:p-6"></div>
@@ -49,15 +46,22 @@ const db = firebase.database();
 
 /* ============ الحالة العامة ============ */
 let role = sessionStorage.getItem("role") || null;
+if (role === "branch") role = "malqa";
 let orders = {}, finance = {};
 let activeSite = SITES[0];
 let formSite = SITES[0];
 let formCodes = [""];
-let withWaybill = false, otoSt = {last: 0, sum: ""}, logiTab = "await";
+let withWaybill = false;
 let formNoon = "regular", noonFilter = "all";
 const bulkSel = new Set();
 const NOON_T = {regular: "نون عادي", express: "نون اكسبريس"};
 const typeOf = o => o.noonType || "regular";
+/* الفروع: تنطبق على Babolat / Raed Sport / Yonex فقط. أمازون ونون تبقى للملقا */
+const BRANCHES = {malqa: "الملقا", khobar: "الخبر", jeddah: "جدة", malaz: "الملز"};
+const BR_KEYS = Object.keys(BRANCHES);
+const BRANCH_SITES = ["Babolat", "Raed Sport", "Yonex"];
+const branchOf = o => BRANCH_SITES.includes(o.site) ? (o.branch || "malqa") : "malqa";
+let formBranch = "malqa", branchFilter = "all";
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -155,7 +159,7 @@ function applyBulk(t){
   db.ref().update(upd); ids.forEach(i => bulkSel.delete(i)); $("#bw_" + t).value = "";
 }
 function bulkHtml(){
-  if (activeSite !== "Noon" || !(noonReady("regular").length || noonReady("express").length)) return "";
+  if (activeSite !== "Noon") return "";
   return `<div class="card p-4 mb-8 space-y-4"><h2 class="font-bold">بوليصة موحدة لأوردرات نون</h2>` + Object.keys(NOON_T).map(t => {
     const g = noonReady(t);
     return `<div class="border border-[var(--pri)] rounded-lg p-3 space-y-2"><div class="font-bold text-[var(--acc)]">${NOON_T[t]} (${g.length} جاهز للبوليصة)</div>` +
@@ -171,7 +175,7 @@ function bulkHtml(){
 /* ============ الإعدادات (تُحفظ في Firebase وتتزامن مع الفرع) ============ */
 const DEF = {
   title: "شحنات المواقع",
-  pins: {admin: "1234", branch: "5678"},
+  pins: {admin: "1234", malqa: "5678", khobar: "5679", jeddah: "5680", malaz: "5681"},
   colors: {pri: "#7b1e2f", bg: "#ffffff", card: "#141011", acc: "#c9a24a"},
   noonExpress: "#c9a24a",
   sites: {
@@ -182,7 +186,7 @@ const DEF = {
     "Yonex":      {color: "#1b5e3a", logo: "", pos: "side"}
   }
 };
-let S = JSON.parse(JSON.stringify(DEF)), settingsReady = false, view = "main", noKeep = false, skipSync = false;
+let S = JSON.parse(JSON.stringify(DEF)), settingsReady = false, view = "main", noKeep = false;
 const POS = {side: "بجانب الاسم", top: "فوق الاسم", bottom: "تحت الاسم"};
 
 function merge(a, b){
@@ -205,7 +209,9 @@ function applyTheme(){
   document.title = S.title;
 }
 db.ref("settings").on("value", snap => {
-  S = merge(DEF, snap.val() || {}); settingsReady = true; applyTheme(); render();
+  const v = snap.val() || {};
+  if (v.pins && v.pins.branch && !v.pins.malqa) v.pins.malqa = v.pins.branch;
+  S = merge(DEF, v); settingsReady = true; applyTheme(); render();
 });
 
 const typeColor = t => t === "express" ? S.noonExpress : S.sites.Noon.color;
@@ -226,7 +232,7 @@ function renderSettings(){
   $("#app").innerHTML = header("إعدادات الموقع", `<button class="tab text-sm" onclick="setView('main')">رجوع</button>`) + `
   <div class="card p-4 mb-4 space-y-3"><h2 class="font-bold">الاسم</h2>${f("st_title", "اسم النظام (يظهر في العنوان وشاشة الدخول)", S.title)}</div>
   <div class="card p-4 mb-4"><h2 class="font-bold mb-2">كلمات المرور</h2>
-    <div class="grid sm:grid-cols-2 gap-3">${f("st_padmin", "كلمة مرور الإدارة", S.pins.admin)}${f("st_pbranch", "كلمة مرور الفرع", S.pins.branch)}</div></div>
+    <div class="grid sm:grid-cols-2 gap-3">${[["admin", "الإدارة"], ...BR_KEYS.map(k => [k, "فرع " + BRANCHES[k]])].map(([k, l]) => f("st_p_" + k, "كلمة مرور " + l, S.pins[k])).join("")}</div></div>
   <div class="card p-4 mb-4"><h2 class="font-bold mb-2">ألوان الموقع</h2>
     <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">${f("st_pri", "اللون الأساسي (الأزرار)", S.colors.pri, "color")}${f("st_bg", "خلفية الصفحة", S.colors.bg, "color")}${f("st_card", "خلفية الكروت", S.colors.card, "color")}${f("st_acc", "اللون الذهبي (البوليصة)", S.colors.acc, "color")}</div></div>
   <div class="card p-4 mb-4 space-y-3"><h2 class="font-bold">المواقع (اللون واللوجو)</h2>
@@ -237,12 +243,14 @@ function renderSettings(){
   <div class="flex gap-2"><button class="btn" onclick="saveSettings()">حفظ الإعدادات</button><button class="tab" onclick="resetSettings()">استعادة الافتراضي</button></div>`;
 }
 function saveSettings(){
-  const g = id => $("#" + id).value.trim(), pa = g("st_padmin"), pb = g("st_pbranch");
-  if (pa.length < 4 || pb.length < 4) return alert("كلمة المرور لا تقل عن 4 أحرف");
-  if (pa === pb) return alert("اجعل كلمتي مرور الإدارة والفرع مختلفتين");
+  const g = id => $("#" + id).value.trim(), pins = {};
+  ["admin", ...BR_KEYS].forEach(k => pins[k] = g("st_p_" + k));
+  const pv = Object.values(pins);
+  if (pv.some(x => x.length < 4)) return alert("كلمة المرور لا تقل عن 4 أحرف");
+  if (new Set(pv).size !== pv.length) return alert("كل كلمات المرور لازم تكون مختلفة عن بعضها");
   const sites = {};
   SITES.forEach((s, i) => sites[s] = {color: g(`st_s${i}_c`), logo: g(`st_s${i}_l`), pos: g(`st_s${i}_p`)});
-  db.ref("settings").set({title: g("st_title") || DEF.title, pins: {admin: pa, branch: pb},
+  db.ref("settings").set({title: g("st_title") || DEF.title, pins,
     colors: {pri: g("st_pri"), bg: g("st_bg"), card: g("st_card"), acc: g("st_acc")}, noonExpress: g("st_nx"), sites})
     .then(() => alert("تم حفظ الإعدادات")).catch(e => alert("تعذر الحفظ: " + e.message));
 }
@@ -251,12 +259,48 @@ function resetSettings(){
   noKeep = true; db.ref("settings").remove();
 }
 
+
+/* ============ الفروع: عرض وتحويل (اختياري من الإدارة) ============ */
+function setFormBranch(k){ syncFormState(); formBranch = k; render(); }
+function setBranchFilter(f){ branchFilter = f; render(); }
+function branchBar(){
+  if (role !== "admin" || !BRANCH_SITES.includes(activeSite)) return "";
+  const all = open().filter(o => o.site === activeSite);
+  const opts = [["all", "كل الفروع", all.length], ...BR_KEYS.map(k => [k, "فرع " + BRANCHES[k], all.filter(o => branchOf(o) === k).length])];
+  return `<div class="flex gap-2 flex-wrap mt-1">${opts.map(([k, l, n]) => `<button class="tab text-sm ${k === branchFilter ? "on" : ""}" onclick="setBranchFilter('${k}')">${l} (${n})</button>`).join("")}</div>`;
+}
+function branchBadge(o){
+  if (!BRANCH_SITES.includes(o.site)) return "";
+  const t = o.transfers && o.transfers.length ? o.transfers[o.transfers.length - 1] : null;
+  return ` <span class="inline-block text-xs rounded px-2 py-1 bg-white/10">📍 فرع ${BRANCHES[branchOf(o)]}</span>` +
+    (t ? ` <span class="inline-block text-xs rounded px-2 py-1 bg-white/10">↪ محوّل من ${BRANCHES[t.from]}</span>` : "");
+}
+function transferNote(o){
+  const t = BRANCH_SITES.includes(o.site) && o.transfers && o.transfers.length ? o.transfers[o.transfers.length - 1] : null;
+  return t ? `<div class="text-xs text-[var(--acc)]">↪ محوّل من فرع ${BRANCHES[t.from]}</div>` : "";
+}
+function transferUi(o){
+  if (!BRANCH_SITES.includes(o.site)) return "";
+  const cur = branchOf(o), bad = o.codes.some(c => c.avail === false);
+  return (bad ? `<div class="text-xs rounded bg-red-900/60 text-red-200 p-2">⚠️ فيه كود غير متوفر في فرع ${BRANCHES[cur]}. حوّل الأوردر لفرع آخر أو وفّر المنتج وسيحدّث الموظف الحالة.</div>` : "") +
+    `<div class="flex gap-2"><select id="tr_${o.id}" class="inp">${BR_KEYS.filter(k => k !== cur).map(k => `<option value="${k}">${BRANCHES[k]}</option>`).join("")}</select><button class="btn" onclick="transferOrder('${o.id}')">تحويل</button></div>`;
+}
+function transferOrder(id){
+  const o = orders[id], to = $("#tr_" + id).value, from = branchOf(o);
+  if (!confirm(`تحويل الأوردر من فرع ${BRANCHES[from]} إلى فرع ${BRANCHES[to]}؟\nستُمسح علامات الأكواد والبوليصة ليبدأ الفرع الجديد من الأول.`)) return;
+  db.ref("orders/" + id).update({
+    branch: to, status: "pending", waybill: "",
+    codes: o.codes.map(c => ({code: c.code, avail: null})),
+    transfers: (o.transfers || []).concat([{from, to, at: Date.now()}])
+  });
+}
+
 /* ============ تسجيل الدخول ============ */
 function renderLogin(){
   $("#app").innerHTML = `
   <div class="card max-w-sm mx-auto mt-16 p-6 space-y-4">
     <h1 class="text-xl font-bold text-center">${esc(S.title)}</h1>
-    <select id="lrole" class="inp"><option value="admin">حساب الإدارة</option><option value="branch">حساب فرع السعودية</option></select>
+    <select id="lrole" class="inp"><option value="admin">حساب الإدارة</option>${BR_KEYS.map(k => `<option value="${k}">فرع ${BRANCHES[k]}</option>`).join("")}</select>
     <input id="lpin" type="password" class="inp" placeholder="رمز الدخول">
     <button class="btn w-full" onclick="login()">دخول</button>
     <p id="lerr" class="text-red-400 text-sm text-center"></p>
@@ -274,11 +318,12 @@ function logout(){ sessionStorage.removeItem("role"); location.reload(); }
 
 /* ============ أدوات مشتركة ============ */
 const list = () => Object.entries(orders).map(([id, o]) => ({id, ...o})).sort((a, b) => b.createdAt - a.createdAt);
-const open = () => list().filter(o => o.status !== "shipped");
+const open = () => list().filter(o => o.status !== "shipped" && (role === "admin" || branchOf(o) === role));
+const visSites = () => (role === "admin" || role === "malqa") ? SITES : BRANCH_SITES;
 const statusLabel = o => o.status === "pending" ? "في انتظار التجهيز" : (o.waybill ? "جاهز للطباعة والشحن" : "في انتظار البوليصة من الإدارة");
 
 function tabsHtml(current, fn){
-  return `<div class="flex gap-2 overflow-x-auto pb-2">` + SITES.map(s => siteTab(s, s === current, `${fn}('${s}')`, open().filter(o => o.site === s).length)).join("") + `</div>`;
+  return `<div class="flex gap-2 overflow-x-auto pb-2">` + visSites().map(s => siteTab(s, s === current, `${fn}('${s}')`, open().filter(o => o.site === s).length)).join("") + `</div>`;
 }
 function header(title, extra = ""){
   return `<div class="flex items-center justify-between gap-2 mb-4"><h1 class="text-lg sm:text-2xl font-bold">${esc(title)}</h1>
@@ -293,44 +338,26 @@ function syncFormState(){
   if (c.length) formCodes = c;
   const w = $("#wbChk"); if (w) withWaybill = w.checked;
 }
-function addCode(){
-  syncFormState(); formCodes.push(""); skipSync = true; render();
-  const ins = document.querySelectorAll(".codeInp"); if (ins.length) ins[ins.length - 1].focus();
-}
-function delCode(i){ syncFormState(); formCodes.splice(i, 1); if (!formCodes.length) formCodes = [""]; skipSync = true; render(); }
+function addCode(){ syncFormState(); formCodes.push(""); render(); }
+function delCode(i){ syncFormState(); formCodes.splice(i, 1); if (!formCodes.length) formCodes = [""]; render(); }
 
 function submitOrder(){
   syncFormState();
-  const needTrk = withWaybill && OTO_SITES.includes(formSite);
   const image = $("#fImg").value.trim();
   const codes = formCodes.map(c => c.trim()).filter(Boolean).map(code => ({code, avail: null}));
   const waybill = withWaybill ? $("#fWb").value.trim() : "";
-  const track = needTrk ? $("#fTrk").value.trim() : "";
   if (!image || !codes.length) return alert("أدخل رابط صورة الأوردر وكوداً واحداً على الأقل");
-  if (withWaybill && !/^https?:\/\//i.test(waybill)) return alert("أدخل رابط بوليصة الشحن PDF بشكل صحيح (يبدأ بـ http) أو ألغِ خيار إرسالها الآن");
-  if (needTrk && !track) return alert("أدخل رقم الطلب في أوتو OTO");
+  if (withWaybill && !waybill) return alert("أدخل رابط البوليصة أو ألغِ خيار إرسالها الآن");
   const rec = {site: formSite, image, codes, waybill, status: "pending", createdAt: Date.now()};
-  if (needTrk) rec.track = track;
   if (formSite === "Noon") rec.noonType = formNoon;
+  if (BRANCH_SITES.includes(formSite)) rec.branch = formBranch;
   db.ref("orders").push(rec);
-  formCodes = [""]; withWaybill = false; skipSync = true;
-  ["#fImg", "#fWb", "#fTrk"].forEach(i => { if ($(i)) $(i).value = ""; });
-  render();
+  formCodes = [""]; withWaybill = false; render();
 }
 function saveWaybill(id){
-  const o = orders[id]; if (!o) return;
-  const v = $("#wb_" + id).value.trim(), needTrk = OTO_SITES.includes(o.site), t = needTrk ? $("#trk_" + id).value.trim() : "";
-  if (!/^https?:\/\//i.test(v)) return alert("أدخل رابط بوليصة الشحن PDF بشكل صحيح (يبدأ بـ http)");
-  if (needTrk && !t) return alert("أدخل رقم الطلب في أوتو OTO");
-  const upd = {waybill: v}; if (needTrk) upd.track = t;
-  db.ref("orders/" + id).update(upd);
-}
-function waybillForm(o){
-  if (o.site === "Noon") return `<div class="text-xs text-[var(--acc)]">بوليصتها تُضاف من قسم البوليصة الموحدة أسفل القائمة</div>`;
-  const oto = OTO_SITES.includes(o.site);
-  return `<input id="wb_${o.id}" class="inp" placeholder="رابط بوليصة الشحن PDF" dir="ltr">` +
-    (oto ? `<input id="trk_${o.id}" class="inp" placeholder="رقم الطلب في أوتو OTO (العمود A بالشيت)" dir="ltr">` : "") +
-    `<button class="btn gold w-full" onclick="saveWaybill('${o.id}')">${oto ? "إضافة البوليصة ورقم الطلب" : "إضافة البوليصة"}</button>`;
+  const v = $("#wb_" + id).value.trim();
+  if (!v) return alert("أدخل رابط البوليصة");
+  db.ref("orders/" + id + "/waybill").set(v);
 }
 function deleteOrder(id){ if (confirm("حذف هذا الأوردر؟")) db.ref("orders/" + id).remove(); }
 
@@ -357,37 +384,36 @@ function deleteFin(id){ if (confirm("حذف هذا السطر؟")) db.ref("finan
 
 function renderAdmin(){
   if (view === "settings") return renderSettings();
-  if (view === "history") return renderHistory();
-  const items = open().filter(o => o.site === activeSite && (activeSite !== "Noon" || noonFilter === "all" || typeOf(o) === noonFilter));
+  const items = open().filter(o => o.site === activeSite && (activeSite !== "Noon" || noonFilter === "all" || typeOf(o) === noonFilter) && (role !== "admin" || branchFilter === "all" || !BRANCH_SITES.includes(activeSite) || branchOf(o) === branchFilter));
   const finRows = Object.entries(finance).map(([id, f]) => ({id, ...f})).sort((a, b) => b.createdAt - a.createdAt);
   const grand = finRows.reduce((t, f) => t + (f.total || 0), 0);
 
-  $("#app").innerHTML = header(S.title + " - الإدارة", `<button class="tab text-sm" onclick="setView('history')">📦 سجل المشحون</button><button class="tab text-sm" onclick="setView('settings')">⚙️ الإعدادات</button>`) + `
+  $("#app").innerHTML = header(S.title + " - الإدارة", `<button class="tab text-sm" onclick="setView('settings')">⚙️ الإعدادات</button>`) + `
   <div class="card p-4 mb-5 space-y-3">
     <h2 class="font-bold">إرسال أوردر جديد</h2>
     <div class="flex gap-2 flex-wrap">${SITES.map(s => siteTab(s, s === formSite, `setFormSite('${s}')`)).join("")}</div>
     ${formSite === "Noon" ? `<div class="flex gap-2">${Object.entries(NOON_T).map(([k, v]) => `${pill(v, typeColor(k), k === formNoon, `setFormNoon('${k}')`)}`).join("")}</div>` : ""}
+    ${BRANCH_SITES.includes(formSite) ? `<div class="flex gap-2 flex-wrap items-center"><span class="text-sm">الفرع:</span>${BR_KEYS.map(k => `<button class="tab ${k === formBranch ? "on" : ""}" onclick="setFormBranch('${k}')">${BRANCHES[k]}</button>`).join("")}</div>` : ""}
     <input id="fImg" class="inp" placeholder="رابط صورة الأوردر" dir="ltr">
     <div class="space-y-2">${formCodes.map((c, i) => `
       <div class="flex gap-2"><input class="inp codeInp" value="${esc(c)}" placeholder="الكود ${i + 1}" dir="ltr">
       ${formCodes.length > 1 ? `<button class="tab" onclick="delCode(${i})">✕</button>` : ""}
       ${i === formCodes.length - 1 ? `<button class="btn" onclick="addCode()">+</button>` : ""}</div>`).join("")}</div>
     <label class="flex items-center gap-2"><input id="wbChk" type="checkbox" ${withWaybill ? "checked" : ""} onchange="syncFormState();render()"> إرسال البوليصة الآن مع الأوردر</label>
-    ${withWaybill ? `<input id="fWb" class="inp" placeholder="رابط بوليصة الشحن PDF (إلزامي)" dir="ltr">` : ""}
-    ${withWaybill && OTO_SITES.includes(formSite) ? `<input id="fTrk" class="inp" placeholder="رقم الطلب في أوتو OTO - العمود A بالشيت (إلزامي)" dir="ltr">` : ""}
+    ${withWaybill ? `<input id="fWb" class="inp" placeholder="رابط بوليصة PDF على Google Drive" dir="ltr">` : ""}
     <button class="btn w-full sm:w-auto" onclick="submitOrder()">إرسال الأوردر إلى الفرع</button>
   </div>
 
   <h2 class="font-bold mb-2">الأوردرات الحالية</h2>
-  ${tabsHtml(activeSite, "setSite")}${noonBar()}
+  ${tabsHtml(activeSite, "setSite")}${noonBar()}${branchBar()}
   <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 mt-2 mb-8">
   ${items.length ? items.map(o => `
     <div class="card p-3 space-y-2">
-      ${badge(o)}${imgHtml(o.image, "h-40")}
+      ${badge(o)}${branchBadge(o)}${imgHtml(o.image, "h-40")}
       <div class="text-xs text-[var(--acc)]">${statusLabel(o)}</div>
       <div class="space-y-1">${o.codes.map(c => `<div class="flex justify-between text-sm bg-black/40 rounded px-2 py-1"><span dir="ltr">${esc(c.code)}</span><span>${c.avail === true ? "✅ متوفر" : c.avail === false ? "❌ غير متوفر" : "—"}</span></div>`).join("")}</div>
-      ${o.status === "prepared" ? (o.waybill ? trackBlock(o) : waybillForm(o)) : (o.track ? trackBlock(o) : "")}${otoLine(o)}
-      <button class="text-red-400 text-xs" onclick="deleteOrder('${o.id}')">حذف الأوردر</button>
+      ${o.status === "prepared" && !o.waybill && o.site === "Noon" ? `<div class="text-xs text-[var(--acc)]">بوليصتها تُضاف من قسم البوليصة الموحدة أسفل القائمة</div>` : ""}${o.status === "prepared" && !o.waybill && o.site !== "Noon" ? `<input id="wb_${o.id}" class="inp" placeholder="رابط البوليصة PDF" dir="ltr"><button class="btn gold w-full" onclick="saveWaybill('${o.id}')">إضافة البوليصة</button>` : ""}
+      ${transferUi(o)}<button class="text-red-400 text-xs" onclick="deleteOrder('${o.id}')">حذف الأوردر</button>
     </div>`).join("") : `<p class="text-[#6b5a5e] col-span-full">لا توجد أوردرات في ${activeSite} حالياً.</p>`}
   </div>
 
@@ -410,201 +436,27 @@ function renderAdmin(){
       <tbody>${finRows.map(f => `<tr class="border-t border-[#3a2227]"><td class="p-2">${esc(f.site)}</td><td>${esc(f.no)}</td><td>${esc(f.name)}</td><td>${esc(f.date)}</td><td>${f.sum}</td><td>${f.ship}</td><td>${f.disc}</td><td class="font-bold">${f.total}</td><td><button class="text-red-400" onclick="deleteFin('${f.id}')">✕</button></td></tr>`).join("")}</tbody>
       <tfoot><tr class="border-t border-[var(--pri)] font-bold"><td colspan="7" class="p-2 text-left">إجمالي التقرير</td><td>${grand.toFixed(2)}</td><td></td></tr></tfoot>
     </table></div>
-  </div>
-  ${logiHtml()}`;
+  </div>`;
   if ($("#ftSite")) onFinSite();
-}
-
-
-
-/* ============ المتابعة اللوجستية وربط OTO (قنوات OTO فقط) ============ */
-const STAGE_T = {await: "بانتظار الاستلام", transit: "جاري شحنها", delivered: "تم توصيلها", returned: "مرتجع"};
-const STAGE_C = {await: "#c9a24a", transit: "#2563eb", delivered: "#1f7a46", returned: "#b3261e"};
-/* Amazon / Noon المشحونة تُعتبر "تم توصيلها" مباشرة (شحنهما ذاتي ولا يمر عبر OTO) */
-const stageOf = o => o.logi || (o.status === "shipped" && !OTO_SITES.includes(o.site) ? "delivered" : null);
-const stageChip = o => { const st = stageOf(o); return st ? `<span class="inline-block text-xs font-bold rounded px-2 py-1" style="background:${STAGE_C[st]};color:${inkOf(STAGE_C[st])}">${STAGE_T[st]}</span>` : ""; };
-const logiList = () => list().filter(o => OTO_SITES.includes(o.site) && o.status === "shipped" && o.logi);
-const otoLine = o => o.otoRaw ? `<div class="text-xs">حالة OTO: <b>${esc(o.otoRaw)}</b></div>` : "";
-function trackBlock(o){
-  if (!OTO_SITES.includes(o.site)) return "";
-  const t = String(o.track || "");
-  if (!t) return `<div class="flex gap-2"><input id="trk_${o.id}" class="inp" placeholder="رقم الطلب في OTO (غير مسجل)" dir="ltr"><button class="btn gold" onclick="saveTrack('${o.id}')">حفظ</button></div>`;
-  return `<div class="text-xs">🔎 رقم الطلب في OTO: <b dir="ltr">${esc(t)}</b></div>`;
-}
-function saveTrack(id){
-  const v = $("#trk_" + id).value.trim();
-  if (!v) return alert("أدخل رقم الطلب في OTO");
-  db.ref("orders/" + id + "/track").set(v);
-}
-function setLogiTab(k){ logiTab = k; render(); }
-function setStage(id, v){
-  if (!v) return;
-  const now = Date.now();
-  db.ref("orders/" + id).update({logi: v, logiAt: now, logiManual: true, deliveredAt: v === "delivered" ? now : null});
-}
-function autoStage(id){ db.ref("orders/" + id).update({logiManual: null}); }
-
-/* --- تحديث الحالات من شيت OTO اليومي (Excel): العمود A = رقم الطلب، العمود H = الحالة --- */
-const normNo = v => String(v == null ? "" : v).replace(/[\u200e\u200f\s]/g, "").replace(/[٠-٩]/g, d => "٠١٢٣٤٥٦٧٨٩".indexOf(d)).toUpperCase();
-/* الحالة من العمود H؛ وإن كان فارغاً أو رقم تتبع (طلب جديد/ملغي/تم تأكيد الشحنة) تُؤخذ من العمود C */
-function otoStatusOf(r){
-  const h = String(r[7] == null ? "" : r[7]).trim(), c = String(r[2] == null ? "" : r[2]).trim();
-  if (h && !/^\d+$/.test(h)) return h;
-  if (c && !/^\d{1,2}\/\d{1,2}\/\d{4}/.test(c)) return c;
-  return "";
-}
-function mapOto(raw){
-  const t = String(raw || "").toLowerCase();
-  if (!t) return null;
-  if (/عكس|إرجاع|ارجاع|مرتجع|return/.test(t)) return "returned";
-  if (/غير ناجح|فشل|undeliver|failed/.test(t)) return "transit";
-  if (/تم توصيل|تم التسليم|تم تسليم|delivered/.test(t)) return "delivered";
-  if (/وصل المستودع|في طريقها|قيد التوصيل|خرج للتوصيل|تم الاستلام|تم استلام|transit|picked/.test(t)) return "transit";
-  if (/الطلبات الجديدة|تم تأكيد الشحنة|جديد|بانتظار|قيد المعالجة|pending/.test(t)) return "await";
-  return null;   /* مثل "طلب ملغي": لا يُنقل الأوردر ويظهر نص الحالة فقط */
-}
-function otoRowsToMap(rows){
-  const m = new Map();
-  rows.forEach(r => { const k = normNo(r && r[0]); if (k && !m.has(k)) m.set(k, otoStatusOf(r)); });
-  return m;
-}
-async function importOto(inp){
-  const f = inp.files && inp.files[0]; inp.value = "";
-  if (!f) return;
-  if (typeof XLSX === "undefined") return alert("مكتبة قراءة Excel لم تُحمَّل. تأكد من الإنترنت ثم أعد تحميل الصفحة.");
-  try {
-    const wb = XLSX.read(await f.arrayBuffer(), {type: "array"});
-    const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], {header: 1, raw: true, defval: ""});
-    const map = otoRowsToMap(rows);
-    if (!map.size) return alert("لم أجد أي صفوف في الملف. تأكد أنه شيت OTO الصحيح.");
-    const now = Date.now(), upd = {}, unknown = new Set(), miss = [];
-    let changed = 0, same = 0, pre = 0, manual = 0, noNo = 0;
-    list().filter(o => OTO_SITES.includes(o.site)).forEach(o => {
-      if (!o.track) { if (o.status === "shipped") noNo++; return; }
-      if (o.logiManual) { manual++; return; }
-      const k = normNo(o.track);
-      if (!map.has(k)) { miss.push(o.track); return; }
-      const raw = map.get(k), st = mapOto(raw), b = "orders/" + o.id + "/";
-      upd[b + "otoRaw"] = raw; upd[b + "otoCheckedAt"] = now;
-      if (raw && !st) unknown.add(raw);
-      if (o.status !== "shipped") { pre++; return; }      /* لم يُشحن من الفرع بعد: نحفظ نص الحالة فقط */
-      const to = st || o.logi || "await";
-      if (to !== o.logi) { upd[b + "logi"] = to; upd[b + "logiAt"] = now; if (to === "delivered") upd[b + "deliveredAt"] = now; changed++; } else same++;
-    });
-    if (Object.keys(upd).length) await db.ref().update(upd);
-    otoSt.last = now;
-    otoSt.sum = `قُرئ ${map.size} طلب من الشيت. نُقل ${changed} أوردر، بدون تغيير ${same}` +
-      (pre ? `، ${pre} لم يُشحن من الفرع بعد (حُفظت حالته فقط)` : "") +
-      (miss.length ? `، غير موجود في الشيت: ${miss.slice(0, 8).join("، ")}` : "") +
-      (noNo ? `، بدون رقم OTO ${noNo}` : "") + (manual ? `، يدوي ${manual}` : "") +
-      (unknown.size ? ` | حالات غير مصنفة (لم تُنقل): ${[...unknown].join("، ")}` : "");
-    render();
-  } catch (e) { alert("تعذر قراءة الملف: " + (e.message || e)); }
-}
-
-function logiHtml(){
-  const all = logiList(), c = {await: 0, transit: 0, delivered: 0, returned: 0, all: all.length};
-  all.forEach(o => { if (c[o.logi] != null) c[o.logi]++; });
-  const tabs = ["await", "transit", "delivered", "returned", "all"].map(k =>
-    `<button class="tab text-sm ${k === logiTab ? "on" : ""}" onclick="setLogiTab('${k}')">${k === "all" ? "جميع الطلبات" : STAGE_T[k]} (${c[k]})</button>`).join("");
-  const rows = all.filter(o => logiTab === "all" || o.logi === logiTab).sort((a, b) => (b.logiAt || 0) - (a.logiAt || 0));
-  const st = otoSt.sum ? `آخر تحديث من الشيت: ${fmtDT(otoSt.last)} | ${esc(otoSt.sum)}` : "ارفع شيت OTO اليومي ليتم تحديث الحالات (رقم الطلب من العمود A والحالة من العمود H).";
-  return `<div class="card p-4 mt-8 mb-8 space-y-3">
-    <div class="flex items-center justify-between gap-2 flex-wrap"><h2 class="font-bold">المتابعة اللوجستية - OTO (${OTO_SITES.map(esc).join(" / ")})</h2>
-      <label class="tab text-sm cursor-pointer">📥 رفع شيت OTO<input type="file" accept=".xlsx,.xls,.csv" class="hidden" onchange="importOto(this)"></label></div>
-    <div class="text-xs text-[var(--acc)]">${st}</div>
-    <div class="flex gap-2 flex-wrap">${tabs}</div>
-    <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-    ${rows.length ? rows.map(o => {
-      const sc = (S.sites[o.site] || {}).color || "#444";
-      return `<div class="bg-black/40 rounded-lg p-3 space-y-2">
-        <div class="flex items-center gap-2 flex-wrap"><span class="inline-block text-xs font-bold rounded px-2 py-1" style="background:${sc};color:${inkOf(sc)}">${esc(o.site)}</span>${stageChip(o)}${o.logiManual ? `<span class="text-xs text-[var(--acc)]">(يدوي)</span>` : ""}</div>
-        <div class="space-y-1">${(o.codes || []).map(k => `<div class="text-sm bg-black/40 rounded px-2 py-1" dir="ltr">${esc(k.code)}</div>`).join("")}</div>
-        ${trackBlock(o)}
-        <div class="text-xs space-y-1"><div>📤 الإرسال: <b dir="ltr">${fmtDT(o.createdAt)}</b></div><div>🚚 الشحن: <b dir="ltr">${fmtDT(o.shippedAt)}</b></div>
-          ${o.deliveredAt ? `<div>📬 التوصيل: <b dir="ltr">${fmtDT(o.deliveredAt)}</b></div>` : ""}
-          ${o.otoRaw ? `<div>حالة OTO: <b dir="ltr">${esc(o.otoRaw)}</b></div>` : ""}
-          ${o.otoCheckedAt ? `<div>آخر تحديث: <b dir="ltr">${fmtDT(o.otoCheckedAt)}</b></div>` : ""}</div>
-        <select class="inp text-xs" onchange="setStage('${o.id}', this.value)"><option value="">نقل يدوي إلى...</option>${Object.entries(STAGE_T).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}</select>
-        ${o.logiManual ? `<button class="tab text-xs" onclick="autoStage('${o.id}')">إعادة التتبع التلقائي</button>` : ""}
-      </div>`;
-    }).join("") : `<p class="text-[#9b8a8e] col-span-full">لا توجد أوردرات في هذا القسم.</p>`}
-    </div></div>`;
-}
-
-/* ============ سجل الأوردرات المشحونة (للإدارة) ============ */
-let hSite = "all", hQ = "", hFrom = "", hTo = "", hStage = "all";
-const pad2 = n => String(n).padStart(2, "0");
-const dayStr = t => { const d = new Date(t); return d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate()); };
-const fmtDT = t => { if (!t) return "—"; const d = new Date(t); return pad2(d.getDate()) + "/" + pad2(d.getMonth() + 1) + "/" + d.getFullYear() + " " + pad2(d.getHours()) + ":" + pad2(d.getMinutes()); };
-function histItems(){
-  const q = hQ.trim().toLowerCase();
-  return list().filter(o => o.status === "shipped"
-      && (hSite === "all" || o.site === hSite)
-      && (!q || (o.codes || []).some(c => String(c.code).toLowerCase().includes(q)))
-      && (hStage === "all" || stageOf(o) === hStage)
-      && (!hFrom || dayStr(o.createdAt) >= hFrom)
-      && (!hTo || dayStr(o.createdAt) <= hTo))
-    .sort((a, b) => (b.shippedAt || b.createdAt) - (a.shippedAt || a.createdAt));
-}
-function histListHtml(){
-  const items = histItems();
-  const cards = items.length ? items.map(o => {
-    const sc = (S.sites[o.site] || {}).color || "#444";
-    return `<div class="card p-3 space-y-2">
-      <div class="flex items-center gap-2 flex-wrap"><span class="inline-block text-xs font-bold rounded px-2 py-1" style="background:${sc};color:${inkOf(sc)}">${esc(o.site)}</span>${badge(o)}${stageChip(o)}</div>
-      ${o.image ? imgHtml(o.image, "h-32") : ""}
-      <div class="text-xs space-y-1"><div>📤 تاريخ الإرسال: <b dir="ltr">${fmtDT(o.createdAt)}</b></div>
-        <div>✅ تاريخ الشحن: <b dir="ltr">${fmtDT(o.shippedAt)}</b></div>${o.deliveredAt ? `<div>📬 تاريخ التوصيل: <b dir="ltr">${fmtDT(o.deliveredAt)}</b></div>` : ""}</div>
-      <div class="space-y-1">${(o.codes || []).map(c => `<div class="flex justify-between text-sm bg-black/40 rounded px-2 py-1"><span dir="ltr">${esc(c.code)}</span><span>${c.avail === true ? "✅ متوفر" : c.avail === false ? "❌ غير متوفر" : "—"}</span></div>`).join("")}</div>
-      ${o.waybill ? `<a class="text-xs text-[var(--acc)] underline" target="_blank" rel="noopener" href="${safeUrl(o.waybill)}">فتح البوليصة</a>` : ""}
-    </div>`;
-  }).join("") : `<p class="text-[#6b5a5e] col-span-full">لا توجد أوردرات مشحونة مطابقة.</p>`;
-  return `<div class="text-sm mb-2">عدد الأوردرات: <b>${items.length}</b></div><div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">${cards}</div>`;
-}
-function updHist(){ const e = $("#histList"); if (e) e.innerHTML = histListHtml(); }
-function setHSite(s){ hSite = s; render(); }
-function clearHist(){ hQ = ""; hFrom = ""; hTo = ""; hSite = "all"; hStage = "all"; noKeep = true; render(); }
-function renderHistory(){
-  const pills = [["all", "الكل"], ...SITES.map(s => [s, s])].map(([k, l]) => {
-    const c = k === "all" ? "#444" : ((S.sites[k] || {}).color || "#444");
-    return pill(l, c, hSite === k, `setHSite('${k}')`);
-  }).join("");
-  $("#app").innerHTML = header("سجل الأوردرات المشحونة", `<button class="tab text-sm" onclick="setView('main')">رجوع</button>`) + `
-  <div class="card p-4 mb-4 space-y-3">
-    <div class="flex gap-2 flex-wrap">${pills}</div>
-    <div class="grid sm:grid-cols-5 gap-2 items-end">
-      <input id="hq" class="inp" placeholder="بحث بالكود" dir="ltr" value="${esc(hQ)}" oninput="hQ=this.value;updHist()">
-      <label class="text-xs space-y-1 block"><span>من تاريخ الإرسال</span><input id="hfrom" type="date" class="inp" value="${esc(hFrom)}" oninput="hFrom=this.value;updHist()"></label>
-      <label class="text-xs space-y-1 block"><span>إلى تاريخ الإرسال</span><input id="hto" type="date" class="inp" value="${esc(hTo)}" oninput="hTo=this.value;updHist()"></label>
-      <select id="hstage" class="inp" onchange="hStage=this.value;updHist()"><option value="all">كل الحالات</option>${Object.entries(STAGE_T).map(([k, v]) => `<option value="${k}" ${hStage === k ? "selected" : ""}>${v}</option>`).join("")}</select>
-      <button class="tab" onclick="clearHist()">مسح الفلاتر</button>
-    </div>
-  </div>
-  <div id="histList">${histListHtml()}</div>`;
 }
 
 /* ============ شاشة فرع السعودية ============ */
 function mark(id, i, val){ db.ref(`orders/${id}/codes/${i}/avail`).set(val); }
 function prepared(id){ db.ref(`orders/${id}/status`).set("prepared"); }
-function shipped(id){
-  const o = orders[id]; if (!o) return;
-  if (!confirm("تأكيد الشحن النهائي؟ سيختفي الأوردر من شاشتك.")) return;
-  const now = Date.now(), upd = {status: "shipped", shippedAt: now, logiAt: now};
-  if (OTO_SITES.includes(o.site)) upd.logi = "await";            /* Babolat / Raed Sport / Yonex: لوحة المتابعة بحالة بانتظار الاستلام */
-  else { upd.logi = "delivered"; upd.deliveredAt = now; }        /* Amazon / Noon: تم توصيلها مباشرة وتنتقل للأرشيف */
-  db.ref("orders/" + id).update(upd);
-}
+function shipped(id){ if (confirm("تأكيد الشحن النهائي؟ سيختفي الأوردر من شاشتك.")) db.ref(`orders/${id}/status`).set("shipped"); }
 
 function renderBranch(){
-  const items = open().filter(o => o.site === activeSite && (activeSite !== "Noon" || noonFilter === "all" || typeOf(o) === noonFilter));
-  $("#app").innerHTML = header(S.title + " - المستودع") + tabsHtml(activeSite, "setSite") + noonBar() + `
+  if (!visSites().includes(activeSite)) activeSite = visSites()[0];
+  const items = open().filter(o => o.site === activeSite && (activeSite !== "Noon" || noonFilter === "all" || typeOf(o) === noonFilter) && (role !== "admin" || branchFilter === "all" || !BRANCH_SITES.includes(activeSite) || branchOf(o) === branchFilter));
+  $("#app").innerHTML = header(S.title + " - فرع " + BRANCHES[role]) + tabsHtml(activeSite, "setSite") + noonBar() + `
   <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 mt-2">
   ${items.length ? items.map(o => {
-    const allMarked = o.codes.every(c => c.avail === true || c.avail === false);
+    /* في مواقع الفروع: لا تجهيز إلا لو كل الأكواد متوفرة */
+    const allMarked = o.codes.every(c => BRANCH_SITES.includes(o.site) ? c.avail === true : (c.avail === true || c.avail === false));
+    const hasMiss = BRANCH_SITES.includes(o.site) && o.codes.some(c => c.avail === false);
     const isPrepared = o.status === "prepared";
     return `<div class="card p-3 space-y-3">
-      ${badge(o)}${imgHtml(o.image, "h-48")}
+      ${badge(o)}${transferNote(o)}${imgHtml(o.image, "h-48")}
       ${o.codes.map((c, i) => `
         <div class="bg-black/40 rounded-lg p-2">
           <div class="font-mono mb-2" dir="ltr">${esc(c.code)}</div>
@@ -612,8 +464,10 @@ function renderBranch(){
             <button ${isPrepared ? "disabled" : ""} class="btn ${c.avail === true ? "" : "opacity-60"}" style="${c.avail === true ? "background:#1f7a46" : ""}" onclick="mark('${o.id}',${i},true)">متوفر ✅</button>
             <button ${isPrepared ? "disabled" : ""} class="btn ${c.avail === false ? "" : "opacity-60"}" style="${c.avail === false ? "background:#b3261e" : ""}" onclick="mark('${o.id}',${i},false)">غير متوفر ❌</button>
           </div></div>`).join("")}
+      ${hasMiss && !isPrepared ? `<p class="text-xs text-center text-[var(--acc)]">تم تسجيل كود غير متوفر، الإدارة ستحدد الشحن من فرع آخر أو توفير المنتج. حدّث الحالة لو توفر.</p>` : ""}
       ${!isPrepared ? `<button class="btn w-full" ${allMarked ? "" : "disabled"} onclick="prepared('${o.id}')">تم التجهيز</button>` : ""}
-      ${o.waybill ? `<div class="grid ${isPrepared ? "grid-cols-2" : "grid-cols-1"} gap-2"><a class="btn gold block text-center" target="_blank" rel="noopener" href="${safeUrl(o.waybill)}">فتح وطباعة بوليصة الشحن PDF</a>${isPrepared ? `<button class="btn" onclick="shipped('${o.id}')">تم الشحن النهائي</button>` : ""}</div>` : (isPrepared ? `<p class="text-sm text-[var(--acc)] text-center">تم الإرسال للإدارة، في انتظار إضافة البوليصة...</p>` : "")}
+      ${o.waybill ? `<a class="btn gold block text-center" target="_blank" rel="noopener" href="${safeUrl(o.waybill)}">فتح وطباعة بوليصة الشحن PDF</a>` : (isPrepared ? `<p class="text-sm text-[var(--acc)] text-center">تم الإرسال للإدارة، في انتظار إضافة البوليصة...</p>` : "")}
+      ${isPrepared && o.waybill ? `<button class="btn w-full" onclick="shipped('${o.id}')">تم الشحن النهائي</button>` : ""}
     </div>`;}).join("") : `<p class="text-[#6b5a5e] col-span-full">لا توجد أوردرات في ${activeSite} حالياً.</p>`}
   </div>`;
 }
@@ -624,8 +478,7 @@ function render(){
   const keep = {};
   document.querySelectorAll("#app input[id], #app select[id]").forEach(e => keep[e.id] = e.value);
   const focusId = document.activeElement && document.activeElement.id;
-  if (role === "admin" && !skipSync) syncFormState();
-  skipSync = false;
+  if (role === "admin") syncFormState();
 
   if (!role) renderLogin(); else if (role === "admin") renderAdmin(); else renderBranch();
 
